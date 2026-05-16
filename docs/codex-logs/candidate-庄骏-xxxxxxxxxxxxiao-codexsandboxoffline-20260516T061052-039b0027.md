@@ -331,6 +331,36 @@ P0 只写入 `manual` 来源；其它 sourceType 先为后续 AI/聊天识别预
 - 本地移动端 Demo `http://127.0.0.1:5173/` 返回 200
 - 未执行云端真实上传：当前环境未提供面试上传环境变量
 
+## 2026-05-16 21:42:10 CST (+0800)
+
+### 用户输入
+推送 ArkmeDemo-main，并创建版本 `0.1.0`，版本说明为「基本框架（未接入AI）」。
+
+### AI 最终输出
+已推送 `ArkmeDemo-main`，并创建 annotated tag `v0.1.0`。
+
+提交信息：`版本0.1.0：基本框架（未接入AI）`
+提交哈希：`625e44ed9b5ec421ac09dd569da789127d5ef47f`
+分支：`main`
+远端：`https://github.com/Flipperusc/ArkmeDemo-main`
+Tag：`v0.1.0`
+Tag 信息：`版本0.1.0：基本框架（未接入AI）`
+Commit URL：`https://github.com/Flipperusc/ArkmeDemo-main/commit/625e44ed9b5ec421ac09dd569da789127d5ef47f`
+Tag URL：`https://github.com/Flipperusc/ArkmeDemo-main/releases/tag/v0.1.0`
+
+说明：当前目录原本没有 `.git`，因此先初始化了本地 Git 仓库，绑定 `Flipperusc/ArkmeDemo-main` 远端，并重新执行 `pnpm setup:git-hooks` 安装本地 pre-push hook。推送时 hook 已运行 `pnpm verify:answer` 并通过。
+
+### 本轮改动文件
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 attention.md
+- `pnpm verify:answer` 通过
+- `git push -u origin main` 成功，pre-push hook 中的 `pnpm verify:answer` 通过
+- `v0.1.0` annotated tag 已创建并推送到远端
+
 ## 2026-05-16 21:27:03 CST (+0800)
 
 ### 用户输入
