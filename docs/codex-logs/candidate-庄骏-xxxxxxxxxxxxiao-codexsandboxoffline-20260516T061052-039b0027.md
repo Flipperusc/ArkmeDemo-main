@@ -792,3 +792,69 @@ AI 与本地规则分工：本地先做私聊对象、时间窗口、候选安�
 - 已提交并推送 `main`
 - 已创建并推送 `v0.2.1` annotated tag
 - 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-17 22:10:02 CST (+0800)
+
+### 用户输入
+请继续开发「安排」模块 AI 能力：相似安排合并与上下文归集。要求先用本地规则筛选最多 3 到 5 条候选安排，再用 deepseek-v4-pro 输出结构化 JSON 判断是否合并、加入上下文、更新进展、更新时间或忽略；高置信度自动合并，中置信度提示确认，低置信度不合并；详情页展示来源上下文、进展记录、合并历史、AI 说明，并支持取消合并、移除上下文、标记不是同一件事；不做群聊全局安排、不做不可逆合并、不删除原始消息、不强行合并不确定内容。
+
+### AI 最终输出
+已完成「安排」模块相似安排合并与上下文归集。
+
+候选筛选在 `src/services/arrangementSimilarityMergeService.ts`：先排除 `ignored`，保留未完成或 14 天内完成的安排，再按 dueTime/fuzzyTimeLabel 时间接近、标题关键词/短语接近、相关人/来源标签接近、sourceType 相关等本地信号打分，只把前 5 条候选交给 DeepSeek。
+
+DeepSeek prompt 在 `src/services/arrangementSimilarityMergePrompt.ts`，输出 `shouldMerge`、`confidence`、`targetArrangementId`、`mergeAction`、`progressNote`、`updatedFields`、`sourceMessageIds`、`reason`、`needsUserConfirmation`。业务侧只保存最终 JSON content，不展示或保存 reasoning_content；thinking 默认仍关闭，复杂推理开关由现有 AI 设置控制。
+
+合并历史存储在安排自身的 `relatedContexts`、`mergedSourceIds`、`progressNotes` 和 `mergeHistory` 中。高置信度自动归集，不创建重复安排；中置信度会显示确认卡；进展类内容如「我已经挂号了」会写入 `progressNotes`。
+
+用户纠错已接入详情页：`undoLastArrangementMerge()` 取消最近一次合并，`removeArrangementRelatedContext()` 移除单条上下文，`markArrangementContextNotSame()` 标记「不是同一件事」。详情页现在展示主安排、来源上下文、相关上下文、进展记录、合并历史和 AI 合并说明。
+
+验证已通过：`pnpm verify:answer`。测试入口：移动端 Demo `http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- src/types/arrangement.ts
+- src/types/arrangementAI.ts
+- src/types/ai.ts
+- src/services/arrangementSimilarityMergePrompt.ts
+- src/services/arrangementSimilarityMergeService.ts
+- src/data/arrangementMergeRecords.ts
+- src/data/arrangements.ts
+- src/pages/Home.tsx
+- src/services/arrangementAIBackfillService.ts
+- src/pages/Arrangements.tsx
+- src/settings/preferences.ts
+- scripts/test-arrangement-ai.mjs
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `AGENTS.md`、`docs/candidate-rules.md`
+- `pnpm verify:answer` 通过
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-17 22:18:47 CST (+0800)
+
+### 用户输入
+推送
+版本更新0.2.3：相似安排合并与上下文归集
+
+### AI 最终输出
+已将 ArkmeDemo-main 当前本地改动提交并推送到 GitHub，并创建/推送 `v0.2.3` annotated tag，版本说明为「版本更新0.2.3：相似安排合并与上下文归集」。
+
+本次推送包含「安排」模块相似安排合并与上下文归集能力、详情页上下文/进展/合并历史展示、用户纠错入口，以及本轮 Codex 记录。推送前已确认上一轮记录存在于当前候选人个人 Markdown 日志和 `src/data/aiConversationLog.ts`，并运行完整校验。
+
+测试入口：移动端 Demo `http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `AGENTS.md`、`docs/candidate-rules.md`
+- 已读取 `github-push-local` 和 `github-tag-version` 技能说明
+- `pnpm verify:answer` 通过
+- 已提交并推送 `main`
+- 已创建并推送 `v0.2.3` annotated tag
+- 未执行云端真实上传：当前环境未提供面试上传环境变量

@@ -66,6 +66,10 @@ import { cn } from "@/lib/utils";
 import { getAISettings } from "@/services/aiSettings";
 import { analyzeArrangementCandidate } from "@/services/arrangementAIService";
 import {
+  analyzeArrangementSimilarityMerge,
+  selectSimilarArrangementMergeCandidates,
+} from "@/services/arrangementSimilarityMergeService";
+import {
   analyzePrivateChatCommitment,
   convertPrivateCommitmentToArrangementCandidate,
 } from "@/services/privateChatCommitmentAIService";
@@ -87,7 +91,10 @@ import {
 } from "@/settings/preferences";
 import type { PageType } from "@/App";
 import type {
+  ArrangementAIMessage,
+  ArrangementAIMergeCandidateResult,
   ArrangementCandidateResult,
+  ArrangementSimilarityMergeResult,
   PrivateChatSupplementMergeResult,
   PrivateChatCommitmentResult,
 } from "@/types/arrangementAI";
@@ -785,6 +792,13 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       ),
     [pendingArrangementCandidates]
   );
+  const pendingSelfArrangementMergeCandidates = React.useMemo(
+    () =>
+      pendingArrangementMergeCandidates.filter(
+        (candidate) => candidate.sourceLabel === t("sendToSelf.title")
+      ),
+    [pendingArrangementMergeCandidates, t]
+  );
   const pendingPrivateArrangementCandidates = React.useMemo(() => {
     if (!activeTestConversationSummary) return [];
     const messageIds = new Set(
@@ -887,6 +901,112 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     };
   }, [refreshPendingArrangementCandidates]);
 
+  const tryMergeSimilarArrangement = React.useCallback(
+    async ({
+      sourceType,
+      sourceLabel,
+      sourceMessageId,
+      sourceText,
+      sourceMessages,
+      candidateResult,
+    }: {
+      sourceType: "self_chat" | "private_chat";
+      sourceLabel: string;
+      sourceMessageId: string;
+      sourceText: string;
+      sourceMessages: ArrangementAIMessage[];
+      candidateResult?: ArrangementCandidateResult;
+    }) => {
+      try {
+        if (!sourceText.trim()) return false;
+        if (
+          hasArrangementForSourceMessage(sourceMessageId) ||
+          hasProcessedArrangementMergeMessage(sourceMessageId)
+        ) {
+          return true;
+        }
+
+        const arrangements = getInitialArrangements();
+        const candidateArrangements = selectSimilarArrangementMergeCandidates({
+          arrangements,
+          sourceType,
+          sourceLabel,
+          sourceText,
+          candidateResult,
+          now: Date.now(),
+        });
+        if (candidateArrangements.length === 0) return false;
+
+        const detectedAt = Date.now();
+        const result = await analyzeArrangementSimilarityMerge({
+          currentUserId: sourceType === "self_chat" ? "self" : demoSenderIdentityId,
+          currentUserName: candidateProfile?.name || "我",
+          sourceType,
+          sourceLabel,
+          sourceMessageId,
+          sourceText,
+          sourceMessages,
+          candidateResult,
+          candidateArrangements,
+          timezone: getRuntimeTimezone(),
+          now: new Date(detectedAt).toISOString(),
+        });
+        if (!result.ok) return false;
+
+        const mergeResult = result.data;
+        if (!mergeResult.shouldMerge || mergeResult.confidence < 0.5) return false;
+
+        const mergeSource = buildSimilarityMergeSource({
+          result: mergeResult,
+          sourceMessageId,
+          sourceText,
+          sourceMessages,
+          detectedAt,
+        });
+        const candidate = saveArrangementAIMergeCandidate({
+          sourceMessageId,
+          sourceMessageIds: mergeSource.sourceMessageIds,
+          sourceText: mergeSource.sourceText,
+          sourceLabel,
+          sourceMessages: mergeSource.sourceMessages,
+          targetArrangementId: mergeResult.targetArrangementId,
+          detectedAt,
+          confidence: mergeResult.confidence,
+          result: mergeResult,
+          status: "pending",
+        });
+
+        if (mergeResult.confidence >= 0.8) {
+          const arrangement = mergeArrangementSupplement({
+            targetArrangementId: mergeResult.targetArrangementId,
+            mergeType: mergeResult.mergeAction,
+            sourceMessageId,
+            sourceMessageIds: mergeSource.sourceMessageIds,
+            sourceText: mergeSource.sourceText,
+            sourceMessages: mergeSource.sourceMessages,
+            addedItems: [],
+            progressNote: mergeResult.progressNote,
+            updatedFields: mergeResult.updatedFields,
+            newTitle: "",
+            detectedAt,
+            confidence: mergeResult.confidence,
+            reason: mergeResult.reason,
+          });
+
+          if (arrangement) {
+            updateArrangementAIMergeCandidateStatus(candidate.id, "auto_merged");
+            refreshPendingArrangementCandidates();
+          }
+        }
+
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [candidateProfile?.name, refreshPendingArrangementCandidates]
+  );
+
   const triggerSelfArrangementDetection = React.useCallback(
     async (record: RecordItem) => {
       try {
@@ -936,6 +1056,24 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           return;
         }
 
+        const mergedSimilarArrangement = await tryMergeSimilarArrangement({
+          sourceType: "self_chat",
+          sourceLabel: t("sendToSelf.title"),
+          sourceMessageId: record.uid,
+          sourceText: content,
+          sourceMessages: [
+            {
+              id: record.uid,
+              senderId: "self",
+              senderName: candidateProfile?.name,
+              content,
+              createdAt: new Date(record.send_at).toISOString(),
+            },
+          ],
+          candidateResult,
+        });
+        if (mergedSimilarArrangement) return;
+
         const candidate = saveArrangementAICandidate({
           scene: "self_chat",
           sourceMessageId: record.uid,
@@ -966,7 +1104,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         // Self-chat sending must not be interrupted by AI recognition.
       }
     },
-    [candidateProfile?.name]
+    [candidateProfile?.name, t, tryMergeSimilarArrangement]
   );
 
   const triggerPrivateSupplementMergeDetection = React.useCallback(
@@ -1086,6 +1224,57 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     [candidateProfile?.name, refreshPendingArrangementCandidates, testIdentities]
   );
 
+  const triggerPrivateSimilarityMergeDetection = React.useCallback(
+    async (
+      summary: TestConversationSummary,
+      message: TestMessage,
+      allMessages: TestMessage[],
+      candidateResult?: ArrangementCandidateResult
+    ) => {
+      try {
+        if (summary.conversationType !== "private") return false;
+        const content = message.text.trim();
+        if (!content) return false;
+        if (
+          hasArrangementForSourceMessage(message.id) ||
+          hasProcessedArrangementMergeMessage(message.id)
+        ) {
+          return true;
+        }
+
+        const settings = await getAISettings();
+        if (!settings.enableAI || !settings.hasApiKey) return false;
+
+        const otherUserName = summary.identity?.name || summary.title;
+        const contextMessages = getPrivateContextMessages(
+          allMessages,
+          summary.conversationId,
+          privateChatSupplementMergeContextLimit
+        );
+        const inputMessages = buildPrivateAIInputMessages(
+          contextMessages.length > 0 ? contextMessages : [message],
+          candidateProfile?.name || "我",
+          otherUserName,
+          testIdentities
+        );
+        const currentMessage = inputMessages.find((item) => item.id === message.id);
+        if (!currentMessage) return false;
+
+        return tryMergeSimilarArrangement({
+          sourceType: "private_chat",
+          sourceLabel: `和 ${otherUserName} 的私聊`,
+          sourceMessageId: message.id,
+          sourceText: content,
+          sourceMessages: inputMessages,
+          candidateResult,
+        });
+      } catch {
+        return false;
+      }
+    },
+    [candidateProfile?.name, testIdentities, tryMergeSimilarArrangement]
+  );
+
   const triggerPrivateCommitmentDetection = React.useCallback(
     async (
       summary: TestConversationSummary,
@@ -1183,6 +1372,14 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           return;
         }
 
+        const mergedSimilarArrangement = await triggerPrivateSimilarityMergeDetection(
+          summary,
+          reply,
+          allMessages,
+          candidateResult
+        );
+        if (mergedSimilarArrangement) return;
+
         const candidate = saveArrangementAICandidate({
           scene: "private_chat",
           sourceMessageId: reply.id,
@@ -1218,7 +1415,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         // Private chat sending must not be interrupted by AI recognition.
       }
     },
-    [candidateProfile?.name, testIdentities]
+    [candidateProfile?.name, testIdentities, triggerPrivateSimilarityMergeDetection]
   );
 
   const createSelfRecord = React.useCallback(
@@ -1288,19 +1485,21 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
 
   const commitArrangementMergeCandidate = React.useCallback(
     (candidate: ArrangementAIMergeCandidateRecord) => {
+      const mergeData = getArrangementMergeCandidateData(candidate.result);
       const arrangement = mergeArrangementSupplement({
         targetArrangementId: candidate.targetArrangementId,
-        mergeType: candidate.result.mergeType,
+        mergeType: mergeData.mergeType,
         sourceMessageId: candidate.sourceMessageId,
         sourceMessageIds: candidate.sourceMessageIds,
         sourceText: candidate.sourceText,
         sourceMessages: candidate.sourceMessages,
-        addedItems: candidate.result.addedItems,
-        updatedFields: candidate.result.updatedFields,
-        newTitle: candidate.result.newTitle,
+        addedItems: mergeData.addedItems,
+        progressNote: mergeData.progressNote,
+        updatedFields: mergeData.updatedFields,
+        newTitle: mergeData.newTitle,
         detectedAt: candidate.detectedAt,
         confidence: candidate.confidence,
-        reason: candidate.result.reason,
+        reason: mergeData.reason,
       });
 
       updateArrangementAIMergeCandidateStatus(
@@ -1527,6 +1726,12 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
 
     newIdentityMessages.forEach((message) => {
       browserNotifiedMessageIdsRef.current.add(message.id);
+      const summary = testConversationSummaries.find(
+        (item) => item.conversationId === message.conversationId
+      );
+      if (summary?.conversationType === "private") {
+        void triggerPrivateSimilarityMergeDetection(summary, message, testMessages);
+      }
     });
 
     const latestMessage = newIdentityMessages.reduce((latest, message) =>
@@ -1551,6 +1756,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     showTestConversation,
     testConversationSummaries,
     testMessages,
+    triggerPrivateSimilarityMergeDetection,
   ]);
 
   const openHomeMessagePreview = React.useCallback(() => {
@@ -1587,7 +1793,10 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           reply,
           nextMessages
         );
-        if (!handledByMerge) {
+        const handledBySimilarMerge = handledByMerge
+          ? true
+          : await triggerPrivateSimilarityMergeDetection(summary, reply, nextMessages);
+        if (!handledBySimilarMerge) {
           await triggerPrivateCommitmentDetection(summary, reply, nextMessages);
         }
       })();
@@ -1596,6 +1805,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       markTestConversationAsRead,
       testMessages,
       triggerPrivateCommitmentDetection,
+      triggerPrivateSimilarityMergeDetection,
       triggerPrivateSupplementMergeDetection,
     ]
   );
@@ -1684,6 +1894,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           records={selfRecords}
           targetUid={sendToSelfTargetUid}
           pendingArrangementCandidates={pendingSelfArrangementCandidates}
+          pendingArrangementMergeCandidates={pendingSelfArrangementMergeCandidates}
           onBack={handleConversationBack}
           onCreateRecord={createSelfRecord}
           onConfirmArrangementCandidate={(candidate) =>
@@ -1698,6 +1909,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onMarkArrangementCandidateWrong={(candidate) =>
             ignoreArrangementCandidate(candidate, "wrong")
           }
+          onConfirmArrangementMergeCandidate={commitArrangementMergeCandidate}
+          onIgnoreArrangementMergeCandidate={ignoreArrangementMergeCandidate}
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
         />
@@ -2911,18 +3124,22 @@ function SendToSelfConversationChat({
   records,
   targetUid,
   pendingArrangementCandidates,
+  pendingArrangementMergeCandidates,
   onBack,
   onCreateRecord,
   onConfirmArrangementCandidate,
   onEditArrangementCandidate,
   onIgnoreArrangementCandidate,
   onMarkArrangementCandidateWrong,
+  onConfirmArrangementMergeCandidate,
+  onIgnoreArrangementMergeCandidate,
   onOpenRecordDetail,
   onOpenRecordSnapshot,
 }: {
   records: RecordItem[];
   targetUid?: string | null;
   pendingArrangementCandidates: ArrangementAICandidateRecord[];
+  pendingArrangementMergeCandidates: ArrangementAIMergeCandidateRecord[];
   onBack: () => void;
   onCreateRecord: (content: string) => void;
   onConfirmArrangementCandidate: (candidate: ArrangementAICandidateRecord) => void;
@@ -2932,6 +3149,8 @@ function SendToSelfConversationChat({
   ) => void;
   onIgnoreArrangementCandidate: (candidate: ArrangementAICandidateRecord) => void;
   onMarkArrangementCandidateWrong: (candidate: ArrangementAICandidateRecord) => void;
+  onConfirmArrangementMergeCandidate: (candidate: ArrangementAIMergeCandidateRecord) => void;
+  onIgnoreArrangementMergeCandidate: (candidate: ArrangementAIMergeCandidateRecord) => void;
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
 }) {
@@ -2979,8 +3198,17 @@ function SendToSelfConversationChat({
         onOpenRecordDetail={onOpenRecordDetail}
         onOpenRecordSnapshot={onOpenRecordSnapshot}
       />
-      {pendingArrangementCandidates.length > 0 && (
+      {(pendingArrangementCandidates.length > 0 ||
+        pendingArrangementMergeCandidates.length > 0) && (
         <div className="shrink-0 space-y-2 border-t border-border-light bg-bg px-3 py-2">
+          {pendingArrangementMergeCandidates.slice(0, 2).map((candidate) => (
+            <ArrangementMergeCandidateCard
+              key={candidate.id}
+              candidate={candidate}
+              onConfirm={() => onConfirmArrangementMergeCandidate(candidate)}
+              onIgnore={() => onIgnoreArrangementMergeCandidate(candidate)}
+            />
+          ))}
           {pendingArrangementCandidates.slice(0, 2).map((candidate) => (
             <SelfArrangementCandidateCard
               key={candidate.id}
@@ -3129,20 +3357,25 @@ function ArrangementMergeCandidateCard({
 }) {
   const { t } = usePreferences();
   const confidenceLabel = `${Math.round(candidate.confidence * 100)}%`;
+  const mergeData = getArrangementMergeCandidateData(candidate.result);
+  const title = mergeData.newTitle || mergeData.progressNote || candidate.sourceText;
+  const detail =
+    mergeData.addedItems.length > 0
+      ? mergeData.addedItems.join("、")
+      : mergeData.progressNote || t("arrangementAI.mergeContextOnly");
 
   return (
     <section className="rounded-[16px] border border-[var(--record-card-border)] bg-surface px-3 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
       <p className="text-[13px] font-semibold leading-5 text-text">
-        {t("arrangementAI.mergeConfirmTitle")}
+        {"mergeAction" in candidate.result
+          ? t("arrangementAI.similarMergeConfirmTitle")
+          : t("arrangementAI.mergeConfirmTitle")}
       </p>
       <p className="mt-1 break-words text-[14px] leading-5 text-text">
-        {candidate.result.newTitle || candidate.sourceText}
+        {title}
       </p>
       <p className="mt-1 text-[12px] leading-5 text-text-tertiary">
-        {candidate.result.addedItems.length > 0
-          ? candidate.result.addedItems.join("、")
-          : t("arrangementAI.mergeContextOnly")}{" "}
-        · {confidenceLabel}
+        {detail} · {confidenceLabel}
       </p>
       <p className="mt-2 rounded-[12px] bg-surface-muted px-3 py-2 text-[12px] leading-5 text-text-muted">
         {candidate.sourceText}
@@ -4465,6 +4698,85 @@ function buildPrivateSupplementMergeSource({
     sourceMessageIds,
     sourceText: sourceMessages.map(formatMergeSourceMessage).join("\n") || reply.text,
     sourceMessages,
+  };
+}
+
+function buildSimilarityMergeSource({
+  result,
+  sourceMessageId,
+  sourceText,
+  sourceMessages,
+  detectedAt,
+}: {
+  result: ArrangementSimilarityMergeResult;
+  sourceMessageId: string;
+  sourceText: string;
+  sourceMessages: ArrangementAIMessage[];
+  detectedAt: number;
+}) {
+  const modelSourceIds = new Set([...result.sourceMessageIds, sourceMessageId]);
+  const role: ArrangementAIMergeSourceMessage["role"] =
+    result.mergeAction === "update_progress"
+      ? "progress"
+      : result.mergeAction === "merge_duplicate" ||
+          result.mergeAction === "add_context" ||
+          result.mergeAction === "update_time"
+        ? "supplement"
+        : "supplement";
+  const normalizedSourceMessages = sourceMessages
+    .filter((message) => modelSourceIds.has(message.id))
+    .map((message): ArrangementAIMergeSourceMessage => ({
+      id: message.id,
+      role,
+      senderName: message.senderName,
+      content: message.content,
+      createdAt: new Date(message.createdAt).getTime(),
+    }));
+  const sourceMessageIds = uniqueTextValues([
+    ...Array.from(modelSourceIds),
+    ...normalizedSourceMessages.map((message) => message.id),
+  ]);
+
+  const fallbackSourceMessages: ArrangementAIMergeSourceMessage[] = [
+    {
+      id: sourceMessageId,
+      role,
+      content: sourceText,
+      createdAt: detectedAt,
+    },
+  ];
+
+  return {
+    sourceMessageIds,
+    sourceText:
+      normalizedSourceMessages.map(formatMergeSourceMessage).join("\n") ||
+      sourceText,
+    sourceMessages:
+      normalizedSourceMessages.length > 0
+        ? normalizedSourceMessages
+        : fallbackSourceMessages,
+  };
+}
+
+function getArrangementMergeCandidateData(result: ArrangementAIMergeCandidateResult) {
+  if ("mergeAction" in result) {
+    return {
+      mergeType: result.mergeAction,
+      addedItems: [],
+      progressNote: result.progressNote,
+      updatedFields: result.updatedFields,
+      newTitle: "",
+      reason: result.reason,
+    };
+  }
+
+  return {
+    mergeType: result.mergeType,
+    addedItems: result.addedItems,
+    progressNote: "",
+    updatedFields: result.updatedFields,
+    newTitle: result.newTitle,
+    reason: result.reason,
   };
 }
 

@@ -8,6 +8,8 @@ import {
   getInitialArrangements,
   ignoreArrangement,
   markArrangementAIWrong,
+  markArrangementContextNotSame,
+  removeArrangementRelatedContext,
   undoLastArrangementMerge,
   updateArrangement,
   updateArrangementStatus,
@@ -20,7 +22,12 @@ import {
 } from "@/data/arrangementAIRecords";
 import { cn } from "@/lib/utils";
 import { usePreferences } from "@/settings/preferences";
-import type { ArrangementItem, ArrangementStatus } from "@/types/arrangement";
+import type {
+  ArrangementItem,
+  ArrangementMergeHistoryItem,
+  ArrangementRelatedContextRole,
+  ArrangementStatus,
+} from "@/types/arrangement";
 
 type ArrangementViewMode = "list" | "create" | "detail" | "edit";
 type ArrangementListScope = "pending" | "later" | "completed";
@@ -202,6 +209,16 @@ export default function Arrangements() {
     refreshArrangements();
   };
 
+  const handleRemoveRelatedContext = (arrangementId: string, contextId: string) => {
+    removeArrangementRelatedContext(arrangementId, contextId);
+    refreshArrangements();
+  };
+
+  const handleMarkRelatedContextNotSame = (arrangementId: string, contextId: string) => {
+    markArrangementContextNotSame(arrangementId, contextId);
+    refreshArrangements();
+  };
+
   if (viewMode === "create") {
     return (
       <ArrangementFormScreen
@@ -240,6 +257,12 @@ export default function Arrangements() {
         onIgnore={() => handleIgnore(selectedArrangement.id)}
         onMarkAIWrong={() => handleMarkAIWrong(selectedArrangement.id)}
         onUndoLastMerge={() => handleUndoLastMerge(selectedArrangement.id)}
+        onRemoveRelatedContext={(contextId) =>
+          handleRemoveRelatedContext(selectedArrangement.id, contextId)
+        }
+        onMarkRelatedContextNotSame={(contextId) =>
+          handleMarkRelatedContextNotSame(selectedArrangement.id, contextId)
+        }
       />
     );
   }
@@ -1012,6 +1035,8 @@ function ArrangementDetailScreen({
   onIgnore,
   onMarkAIWrong,
   onUndoLastMerge,
+  onRemoveRelatedContext,
+  onMarkRelatedContextNotSame,
 }: {
   arrangement: ArrangementItem;
   locale: string;
@@ -1025,6 +1050,8 @@ function ArrangementDetailScreen({
   onIgnore: () => void;
   onMarkAIWrong: () => void;
   onUndoLastMerge: () => void;
+  onRemoveRelatedContext: (contextId: string) => void;
+  onMarkRelatedContextNotSame: (contextId: string) => void;
 }) {
   const { t } = usePreferences();
   const statusMeta = getStatusMeta(arrangement.status, t);
@@ -1115,116 +1142,12 @@ function ArrangementDetailScreen({
           />
         </section>
 
-        <section className="mt-3 rounded-[18px] border border-[var(--record-card-border)] bg-surface px-4 py-3">
-          <p className="text-[13px] font-medium leading-5 text-text-muted">
-            {t("arrangements.sourceContext")}
-          </p>
-          {arrangement.sourceContext && arrangement.sourceContext.sourceType !== "manual" ? (
-            <div className="mt-2 space-y-2">
-              <p className="rounded-[14px] bg-surface-muted px-3 py-2 text-[14px] leading-6 text-text-muted">
-                {arrangement.sourceContext.sourceLabel || t("arrangements.sourceSelfChat")}
-              </p>
-              <div className="rounded-[14px] bg-surface-muted px-3 py-2">
-                <p className="text-[12px] font-medium leading-5 text-text-tertiary">
-                  {t("arrangements.sourceOriginal")}
-                </p>
-                <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
-                  {arrangement.sourceContext.messageContent}
-                </p>
-              </div>
-              {arrangement.sourceContext.requestMessageContent && (
-                <div className="rounded-[14px] bg-surface-muted px-3 py-2">
-                  <p className="text-[12px] font-medium leading-5 text-text-tertiary">
-                    {t("arrangements.sourceRequest")}
-                  </p>
-                  <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
-                    {arrangement.sourceContext.requestMessageContent}
-                  </p>
-                </div>
-              )}
-              {arrangement.sourceContext.commitmentMessageContent && (
-                <div className="rounded-[14px] bg-surface-muted px-3 py-2">
-                  <p className="text-[12px] font-medium leading-5 text-text-tertiary">
-                    {t("arrangements.sourceCommitment")}
-                  </p>
-                  <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
-                    {arrangement.sourceContext.commitmentMessageContent}
-                  </p>
-                </div>
-              )}
-              {arrangement.relatedContexts
-                .filter((context) => context.role === "supplement")
-                .map((context) => (
-                  <div
-                    key={context.id}
-                    className="rounded-[14px] bg-surface-muted px-3 py-2"
-                  >
-                    <p className="text-[12px] font-medium leading-5 text-text-tertiary">
-                      {t("arrangements.sourceSupplement")}
-                    </p>
-                    <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
-                      {context.senderName
-                        ? `${context.senderName}：${context.content}`
-                        : context.content}
-                    </p>
-                  </div>
-                ))}
-              {arrangement.mergeHistory.length > 0 && (
-                <div className="rounded-[14px] bg-surface-muted px-3 py-2">
-                  <p className="text-[12px] font-medium leading-5 text-text-tertiary">
-                    {t("arrangements.mergeHistory")}
-                  </p>
-                  <div className="mt-1 space-y-1">
-                    {arrangement.mergeHistory.map((history) => (
-                      <p
-                        key={history.id}
-                        className="text-[13px] leading-5 text-text-muted"
-                      >
-                        {formatFullDateTime(history.mergedAt, locale)}
-                        {history.addedItems.length > 0
-                          ? ` · ${history.addedItems.join("、")}`
-                          : ""}
-                      </p>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {arrangement.sourceContext.executor && (
-                <DetailRow
-                  label={t("arrangements.sourceExecutor")}
-                  value={arrangement.sourceContext.executor}
-                />
-              )}
-              {arrangement.sourceContext.beneficiary && (
-                <DetailRow
-                  label={t("arrangements.sourceBeneficiary")}
-                  value={arrangement.sourceContext.beneficiary}
-                />
-              )}
-              <DetailRow
-                label={t("arrangements.sourceDetectedAt")}
-                value={
-                  arrangement.sourceContext.detectedAt
-                    ? formatFullDateTime(arrangement.sourceContext.detectedAt, locale)
-                    : t("arrangements.timeUnset")
-                }
-              />
-              <DetailRow
-                label={t("arrangements.sourceConfidence")}
-                value={
-                  arrangement.sourceContext.confidence !== null
-                    ? `${Math.round(arrangement.sourceContext.confidence * 100)}%`
-                    : "-"
-                }
-                last
-              />
-            </div>
-          ) : (
-            <p className="mt-2 rounded-[14px] bg-surface-muted px-3 py-2 text-[14px] leading-6 text-text-muted">
-              {t("arrangements.sourceManual")}
-            </p>
-          )}
-        </section>
+        <ArrangementSourceContextSection
+          arrangement={arrangement}
+          locale={locale}
+          onRemoveRelatedContext={onRemoveRelatedContext}
+          onMarkRelatedContextNotSame={onMarkRelatedContextNotSame}
+        />
 
         {arrangement.status === "later" && (
           <p className="mt-3 rounded-[18px] bg-primary-soft px-4 py-3 text-[13px] leading-5 text-primary">
@@ -1324,6 +1247,233 @@ function DetailRow({
       </span>
     </div>
   );
+}
+
+function ArrangementSourceContextSection({
+  arrangement,
+  locale,
+  onRemoveRelatedContext,
+  onMarkRelatedContextNotSame,
+}: {
+  arrangement: ArrangementItem;
+  locale: string;
+  onRemoveRelatedContext: (contextId: string) => void;
+  onMarkRelatedContextNotSame: (contextId: string) => void;
+}) {
+  const { t } = usePreferences();
+  const sourceContext = arrangement.sourceContext;
+
+  return (
+    <section className="mt-3 rounded-[18px] border border-[var(--record-card-border)] bg-surface px-4 py-3">
+      <p className="text-[13px] font-medium leading-5 text-text-muted">
+        {t("arrangements.sourceContext")}
+      </p>
+      <div className="mt-2 space-y-2">
+        {sourceContext && sourceContext.sourceType !== "manual" ? (
+          <>
+            <p className="rounded-[14px] bg-surface-muted px-3 py-2 text-[14px] leading-6 text-text-muted">
+              {sourceContext.sourceLabel || t("arrangements.sourceSelfChat")}
+            </p>
+            <ArrangementContextBlock
+              title={t("arrangements.sourceOriginal")}
+              content={sourceContext.messageContent}
+            />
+            {sourceContext.requestMessageContent && (
+              <ArrangementContextBlock
+                title={t("arrangements.sourceRequest")}
+                content={sourceContext.requestMessageContent}
+              />
+            )}
+            {sourceContext.commitmentMessageContent && (
+              <ArrangementContextBlock
+                title={t("arrangements.sourceCommitment")}
+                content={sourceContext.commitmentMessageContent}
+              />
+            )}
+          </>
+        ) : (
+          <p className="rounded-[14px] bg-surface-muted px-3 py-2 text-[14px] leading-6 text-text-muted">
+            {t("arrangements.sourceManual")}
+          </p>
+        )}
+
+        {arrangement.relatedContexts.length > 0 && (
+          <div className="space-y-2">
+            <p className="px-1 text-[12px] font-medium leading-5 text-text-tertiary">
+              {t("arrangements.relatedContextList")}
+            </p>
+            {arrangement.relatedContexts.map((context) => (
+              <ArrangementRelatedContextBlock
+                key={context.id}
+                title={getRelatedContextTitle(context.role, t)}
+                content={
+                  context.senderName
+                    ? `${context.senderName}：${context.content}`
+                    : context.content
+                }
+                onRemove={() => onRemoveRelatedContext(context.id)}
+                onMarkNotSame={() => onMarkRelatedContextNotSame(context.id)}
+              />
+            ))}
+          </div>
+        )}
+
+        {arrangement.progressNotes.length > 0 && (
+          <div className="rounded-[14px] bg-surface-muted px-3 py-2">
+            <p className="text-[12px] font-medium leading-5 text-text-tertiary">
+              {t("arrangements.progressNotes")}
+            </p>
+            <div className="mt-1 space-y-1.5">
+              {arrangement.progressNotes.map((note) => (
+                <p key={note.id} className="text-[13px] leading-5 text-text-muted">
+                  {formatFullDateTime(note.createdAt, locale)} · {note.content}
+                </p>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {arrangement.mergeHistory.length > 0 && (
+          <div className="rounded-[14px] bg-surface-muted px-3 py-2">
+            <p className="text-[12px] font-medium leading-5 text-text-tertiary">
+              {t("arrangements.mergeHistory")}
+            </p>
+            <div className="mt-1 space-y-1.5">
+              {arrangement.mergeHistory.map((history) => (
+                <p key={history.id} className="text-[13px] leading-5 text-text-muted">
+                  {formatFullDateTime(history.mergedAt, locale)} ·{" "}
+                  {formatMergeHistorySummary(history, t)}
+                </p>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {arrangement.mergeHistory.some((history) => history.reason) && (
+          <div className="rounded-[14px] bg-surface-muted px-3 py-2">
+            <p className="text-[12px] font-medium leading-5 text-text-tertiary">
+              {t("arrangements.mergeReason")}
+            </p>
+            <p className="mt-1 whitespace-pre-wrap break-words text-[13px] leading-5 text-text-muted">
+              {arrangement.mergeHistory.at(-1)?.reason}
+            </p>
+          </div>
+        )}
+
+        {sourceContext?.executor && (
+          <DetailRow label={t("arrangements.sourceExecutor")} value={sourceContext.executor} />
+        )}
+        {sourceContext?.beneficiary && (
+          <DetailRow
+            label={t("arrangements.sourceBeneficiary")}
+            value={sourceContext.beneficiary}
+          />
+        )}
+        {sourceContext && sourceContext.sourceType !== "manual" && (
+          <>
+            <DetailRow
+              label={t("arrangements.sourceDetectedAt")}
+              value={
+                sourceContext.detectedAt
+                  ? formatFullDateTime(sourceContext.detectedAt, locale)
+                  : t("arrangements.timeUnset")
+              }
+            />
+            <DetailRow
+              label={t("arrangements.sourceConfidence")}
+              value={
+                sourceContext.confidence !== null
+                  ? `${Math.round(sourceContext.confidence * 100)}%`
+                  : "-"
+              }
+              last
+            />
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ArrangementContextBlock({
+  title,
+  content,
+}: {
+  title: string;
+  content: string;
+}) {
+  return (
+    <div className="rounded-[14px] bg-surface-muted px-3 py-2">
+      <p className="text-[12px] font-medium leading-5 text-text-tertiary">{title}</p>
+      <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
+        {content}
+      </p>
+    </div>
+  );
+}
+
+function ArrangementRelatedContextBlock({
+  title,
+  content,
+  onRemove,
+  onMarkNotSame,
+}: {
+  title: string;
+  content: string;
+  onRemove: () => void;
+  onMarkNotSame: () => void;
+}) {
+  const { t } = usePreferences();
+
+  return (
+    <div className="rounded-[14px] bg-surface-muted px-3 py-2">
+      <p className="text-[12px] font-medium leading-5 text-text-tertiary">{title}</p>
+      <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
+        {content}
+      </p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="rounded-full bg-surface px-2.5 py-1 text-[12px] leading-4 text-text-muted"
+          onClick={onRemove}
+        >
+          {t("arrangements.removeContext")}
+        </button>
+        <button
+          type="button"
+          className="rounded-full bg-surface px-2.5 py-1 text-[12px] leading-4 text-text-muted"
+          onClick={onMarkNotSame}
+        >
+          {t("arrangements.markNotSame")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function getRelatedContextTitle(
+  role: ArrangementRelatedContextRole,
+  t: ReturnType<typeof usePreferences>["t"]
+) {
+  if (role === "request") return t("arrangements.sourceRequest");
+  if (role === "commitment") return t("arrangements.sourceCommitment");
+  if (role === "progress") return t("arrangements.sourceProgress");
+  return t("arrangements.sourceSupplement");
+}
+
+function formatMergeHistorySummary(
+  history: ArrangementMergeHistoryItem,
+  t: ReturnType<typeof usePreferences>["t"]
+) {
+  if (history.mergeType === "merge_duplicate") return t("arrangements.mergeDuplicate");
+  if (history.mergeType === "add_context") return t("arrangements.mergeAddContext");
+  if (history.mergeType === "update_progress") {
+    return history.progressNote || t("arrangements.mergeProgress");
+  }
+  if (history.mergeType === "update_time") return t("arrangements.mergeUpdateTime");
+  if (history.mergeType === "remove_context") return t("arrangements.mergeRemoveContext");
+  if (history.addedItems.length > 0) return history.addedItems.join("、");
+  return t("arrangements.mergeContextOnly");
 }
 
 function getStatusMeta(

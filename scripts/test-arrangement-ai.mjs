@@ -20,6 +20,10 @@ const {
 const {
   analyzePrivateChatSupplementMerge,
 } = loadTsModule(path.join(rootDir, "src/services/privateChatSupplementMergeAIService.ts"));
+const {
+  analyzeArrangementSimilarityMerge,
+  selectSimilarArrangementMergeCandidates,
+} = loadTsModule(path.join(rootDir, "src/services/arrangementSimilarityMergeService.ts"));
 const { callDeepSeekJSON } = loadTsModule(
   path.join(rootDir, "src/services/deepseekClient.ts")
 );
@@ -121,6 +125,7 @@ await runSmartCompletionGuardCase();
 runSelfChatArrangementCreationCase();
 await runPrivateChatCommitmentCase();
 await runPrivateChatSupplementMergeCase();
+await runSimilarArrangementContextMergeCase();
 await runArrangementBackfillCase();
 
 console.log("arrangement ai tests passed");
@@ -835,6 +840,280 @@ async function runPrivateChatSupplementMergeCase() {
   assert.equal(restoredArrangement.mergeHistory.length, 0);
 }
 
+async function runSimilarArrangementContextMergeCase() {
+  installWindowStorageStub();
+  const {
+    createArrangement,
+    getInitialArrangements,
+    mergeArrangementSupplement,
+    undoLastArrangementMerge,
+    removeArrangementRelatedContext,
+    hasArrangementForSourceMessage,
+  } = loadTsModule(path.join(rootDir, "src/data/arrangements.ts"));
+
+  const hospitalArrangement = createArrangement({
+    title: "后天去医院",
+    note: "先挂号，带上身份证。",
+    timeType: "fuzzy",
+    fuzzyTimeLabel: "后天",
+    dateValue: "",
+    dateTimeValue: "",
+    dueValue: "",
+    reminderEnabled: false,
+    reminderOffsetMinutes: 30,
+  });
+  assert.ok(hospitalArrangement);
+
+  const fatherCandidateResult = arrangementRaw({
+    title: "后天去医院",
+    summary: "爸爸提醒用户记得去医院。",
+    type: "schedule",
+    timeType: "fuzzy",
+    fuzzyTimeLabel: "后天",
+    items: ["去医院"],
+    sourceType: "private_chat",
+    sourceMessageIds: ["father-remind-1"],
+  });
+  const fatherCandidates = selectSimilarArrangementMergeCandidates({
+    arrangements: getInitialArrangements(),
+    sourceType: "private_chat",
+    sourceLabel: "和 爸爸 的私聊",
+    sourceText: "一定记得去医院，知道吗？",
+    candidateResult: fatherCandidateResult,
+    now: 1778951000000,
+  });
+  assert.equal(fatherCandidates[0].id, hospitalArrangement.id);
+  assert.ok(fatherCandidates.length <= 5);
+
+  const fatherMerge = await analyzeArrangementSimilarityMerge(
+    {
+      currentUserId: "demo",
+      currentUserName: "庄骏",
+      sourceType: "private_chat",
+      sourceLabel: "和 爸爸 的私聊",
+      sourceMessageId: "father-remind-1",
+      sourceText: "一定记得去医院，知道吗？",
+      sourceMessages: [
+        {
+          id: "father-remind-1",
+          senderId: "father",
+          senderName: "爸爸",
+          content: "一定记得去医院，知道吗？",
+          createdAt: "2026-05-17T09:05:00+08:00",
+        },
+      ],
+      candidateResult: fatherCandidateResult,
+      candidateArrangements: fatherCandidates,
+      timezone: "Asia/Shanghai",
+      now: "2026-05-17T09:05:10+08:00",
+    },
+    {
+      callJSON: async () => ({
+        ok: true,
+        data: similarMergeRaw({
+          targetArrangementId: hospitalArrangement.id,
+          mergeAction: "merge_duplicate",
+          sourceMessageIds: ["father-remind-1"],
+          reason: "与已有后天去医院安排主题和时间一致，是重复提醒。",
+        }),
+      }),
+    }
+  );
+  assert.equal(fatherMerge.ok, true);
+  assert.equal(fatherMerge.data.shouldMerge, true);
+  assert.equal(fatherMerge.data.mergeAction, "merge_duplicate");
+
+  const mergedReminder = mergeArrangementSupplement({
+    targetArrangementId: fatherMerge.data.targetArrangementId,
+    mergeType: fatherMerge.data.mergeAction,
+    sourceMessageId: "father-remind-1",
+    sourceMessageIds: fatherMerge.data.sourceMessageIds,
+    sourceText: "爸爸：一定记得去医院，知道吗？",
+    sourceMessages: [
+      {
+        id: "father-remind-1",
+        role: "supplement",
+        senderName: "爸爸",
+        content: "一定记得去医院，知道吗？",
+        createdAt: 1778951100000,
+      },
+    ],
+    addedItems: [],
+    progressNote: "",
+    updatedFields: {},
+    newTitle: "",
+    detectedAt: 1778951100000,
+    confidence: fatherMerge.data.confidence,
+    reason: fatherMerge.data.reason,
+  });
+  assert.ok(mergedReminder);
+  assert.equal(mergedReminder.title, "后天去医院");
+  assert.equal(mergedReminder.relatedContexts.length, 1);
+  assert.equal(hasArrangementForSourceMessage("father-remind-1"), true);
+
+  const sisterMerge = await analyzeArrangementSimilarityMerge(
+    {
+      currentUserId: "demo",
+      currentUserName: "庄骏",
+      sourceType: "private_chat",
+      sourceLabel: "和 姐姐 的私聊",
+      sourceMessageId: "sister-context-1",
+      sourceText: "你身体情况怎么办？",
+      sourceMessages: [
+        {
+          id: "sister-context-1",
+          senderId: "sister",
+          senderName: "姐姐",
+          content: "你身体情况怎么办？",
+          createdAt: "2026-05-17T09:08:00+08:00",
+        },
+      ],
+      candidateResult: undefined,
+      candidateArrangements: [mergedReminder],
+      timezone: "Asia/Shanghai",
+      now: "2026-05-17T09:08:10+08:00",
+    },
+    {
+      callJSON: async () => ({
+        ok: true,
+        data: similarMergeRaw({
+          targetArrangementId: hospitalArrangement.id,
+          mergeAction: "add_context",
+          sourceMessageIds: ["sister-context-1"],
+          reason: "姐姐询问身体情况，与去医院安排相关，但不是新安排。",
+        }),
+      }),
+    }
+  );
+  assert.equal(sisterMerge.data.mergeAction, "add_context");
+
+  const mergedContext = mergeArrangementSupplement({
+    targetArrangementId: sisterMerge.data.targetArrangementId,
+    mergeType: sisterMerge.data.mergeAction,
+    sourceMessageId: "sister-context-1",
+    sourceMessageIds: sisterMerge.data.sourceMessageIds,
+    sourceText: "姐姐：你身体情况怎么办？",
+    sourceMessages: [
+      {
+        id: "sister-context-1",
+        role: "supplement",
+        senderName: "姐姐",
+        content: "你身体情况怎么办？",
+        createdAt: 1778951280000,
+      },
+    ],
+    addedItems: [],
+    progressNote: "",
+    updatedFields: {},
+    newTitle: "",
+    detectedAt: 1778951280000,
+    confidence: sisterMerge.data.confidence,
+    reason: sisterMerge.data.reason,
+  });
+  assert.ok(mergedContext);
+  assert.equal(mergedContext.relatedContexts.length, 2);
+
+  const progressMerge = await analyzeArrangementSimilarityMerge(
+    {
+      currentUserId: "demo",
+      currentUserName: "庄骏",
+      sourceType: "self_chat",
+      sourceLabel: "发给自己的消息",
+      sourceMessageId: "self-progress-1",
+      sourceText: "我已经到医院挂号了",
+      sourceMessages: [
+        {
+          id: "self-progress-1",
+          senderId: "demo",
+          senderName: "庄骏",
+          content: "我已经到医院挂号了",
+          createdAt: "2026-05-17T09:12:00+08:00",
+        },
+      ],
+      candidateResult: undefined,
+      candidateArrangements: [mergedContext],
+      timezone: "Asia/Shanghai",
+      now: "2026-05-17T09:12:10+08:00",
+    },
+    {
+      callJSON: async () => ({
+        ok: true,
+        data: similarMergeRaw({
+          targetArrangementId: hospitalArrangement.id,
+          mergeAction: "update_progress",
+          progressNote: "已到医院挂号",
+          sourceMessageIds: ["self-progress-1"],
+          reason: "这是去医院安排的进展反馈。",
+        }),
+      }),
+    }
+  );
+  assert.equal(progressMerge.data.mergeAction, "update_progress");
+
+  const mergedProgress = mergeArrangementSupplement({
+    targetArrangementId: progressMerge.data.targetArrangementId,
+    mergeType: progressMerge.data.mergeAction,
+    sourceMessageId: "self-progress-1",
+    sourceMessageIds: progressMerge.data.sourceMessageIds,
+    sourceText: "我已经到医院挂号了",
+    sourceMessages: [
+      {
+        id: "self-progress-1",
+        role: "progress",
+        senderName: "庄骏",
+        content: "我已经到医院挂号了",
+        createdAt: 1778951520000,
+      },
+    ],
+    addedItems: [],
+    progressNote: progressMerge.data.progressNote,
+    updatedFields: {},
+    newTitle: "",
+    detectedAt: 1778951520000,
+    confidence: progressMerge.data.confidence,
+    reason: progressMerge.data.reason,
+  });
+  assert.ok(mergedProgress);
+  assert.equal(mergedProgress.progressNotes.length, 1);
+  assert.equal(mergedProgress.progressNotes[0].content, "已到医院挂号");
+
+  const restoredAfterProgress = undoLastArrangementMerge(mergedProgress.id);
+  assert.ok(restoredAfterProgress);
+  assert.equal(restoredAfterProgress.progressNotes.length, 0);
+
+  const supermarketCandidates = selectSimilarArrangementMergeCandidates({
+    arrangements: getInitialArrangements(),
+    sourceType: "self_chat",
+    sourceLabel: "发给自己的消息",
+    sourceText: "后天去超市",
+    candidateResult: arrangementRaw({
+      title: "后天去超市",
+      summary: "用户后天去超市。",
+      type: "schedule",
+      timeType: "fuzzy",
+      fuzzyTimeLabel: "后天",
+      items: ["去超市"],
+      sourceType: "self_chat",
+      sourceMessageIds: ["self-supermarket-1"],
+    }),
+    now: 1778951600000,
+  });
+  assert.equal(
+    supermarketCandidates.some((arrangement) => arrangement.id === hospitalArrangement.id),
+    false
+  );
+
+  const removedContext = removeArrangementRelatedContext(
+    restoredAfterProgress.id,
+    "context-sister-context-1"
+  );
+  assert.ok(removedContext);
+  assert.equal(
+    removedContext.relatedContexts.some((context) => context.messageId === "sister-context-1"),
+    false
+  );
+}
+
 function createPrivateCommitmentInput(messages) {
   return {
     currentUserId: "demo",
@@ -905,6 +1184,21 @@ function privateMergeRaw(overrides) {
     newTitle: "",
     sourceMessageIds: [],
     reason: "补充内容属于已有安排。",
+    needsUserConfirmation: false,
+    ...overrides,
+  };
+}
+
+function similarMergeRaw(overrides) {
+  return {
+    shouldMerge: true,
+    confidence: 0.88,
+    targetArrangementId: "",
+    mergeAction: "add_context",
+    progressNote: "",
+    updatedFields: {},
+    sourceMessageIds: [],
+    reason: "新内容属于已有安排的相关上下文。",
     needsUserConfirmation: false,
     ...overrides,
   };

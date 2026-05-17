@@ -9,6 +9,7 @@ export const DEFAULT_REASONING_EFFORT: AIReasoningEffort = "high";
 export const ARRANGEMENT_AI_JSON_MAX_TOKENS = 2000;
 export const PRIVATE_COMMITMENT_JSON_MAX_TOKENS = 2000;
 export const PRIVATE_SUPPLEMENT_MERGE_JSON_MAX_TOKENS = 1600;
+export const ARRANGEMENT_SIMILAR_MERGE_JSON_MAX_TOKENS = 1800;
 
 export const deepseekDefaultBaseUrl = DEFAULT_DEEPSEEK_BASE_URL;
 export const deepseekDefaultModel = DEFAULT_DEEPSEEK_MODEL;

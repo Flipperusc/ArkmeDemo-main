@@ -4,6 +4,7 @@ import type {
   ArrangementMergeHistoryItem,
   ArrangementMergeSnapshot,
   ArrangementMergeType,
+  ArrangementProgressNote,
   ArrangementReminder,
   ArrangementRelatedContext,
   ArrangementRelatedPerson,
@@ -54,7 +55,7 @@ export type ArrangementAICreateSource = {
 
 export type ArrangementAIMergeSourceMessage = {
   id: string;
-  role: "supplement" | "commitment" | "request";
+  role: "supplement" | "commitment" | "request" | "progress";
   senderName?: string;
   content: string;
   createdAt?: number;
@@ -68,6 +69,7 @@ export type ArrangementAIMergeSource = {
   sourceText: string;
   sourceMessages: ArrangementAIMergeSourceMessage[];
   addedItems: string[];
+  progressNote?: string;
   updatedFields: Record<string, unknown>;
   newTitle: string;
   detectedAt: number;
@@ -92,7 +94,9 @@ const defaultArrangements: ArrangementItem[] = [
     items: [],
     sourceType: "manual",
     sourceMessageIds: [],
+    mergedSourceIds: [],
     relatedContexts: [],
+    progressNotes: [],
     mergeHistory: [],
     relatedPeople: [],
     reminder: {
@@ -119,7 +123,9 @@ const defaultArrangements: ArrangementItem[] = [
     items: ["早餐"],
     sourceType: "manual",
     sourceMessageIds: [],
+    mergedSourceIds: [],
     relatedContexts: [],
+    progressNotes: [],
     mergeHistory: [],
     relatedPeople: [
       {
@@ -153,7 +159,9 @@ const defaultArrangements: ArrangementItem[] = [
     items: [],
     sourceType: "manual",
     sourceMessageIds: [],
+    mergedSourceIds: [],
     relatedContexts: [],
+    progressNotes: [],
     mergeHistory: [],
     relatedPeople: [],
     reminder: {
@@ -376,7 +384,8 @@ function normalizeRelatedContext(
   const role =
     context.role === "request" ||
     context.role === "commitment" ||
-    context.role === "supplement"
+    context.role === "supplement" ||
+    context.role === "progress"
       ? context.role
       : "supplement";
 
@@ -390,6 +399,32 @@ function normalizeRelatedContext(
     content,
     createdAt: normalizeTimestamp(context.createdAt),
     addedAt: normalizeTimestamp(context.addedAt) ?? Date.now() + index,
+  };
+}
+
+function normalizeProgressNote(
+  value: unknown,
+  index: number
+): ArrangementProgressNote | null {
+  if (!value || typeof value !== "object") return null;
+
+  const note = value as Partial<ArrangementProgressNote>;
+  const content = normalizeText(note.content);
+  if (!content) return null;
+  const createdAt = normalizeTimestamp(note.createdAt) ?? Date.now() + index;
+
+  return {
+    id: normalizeText(note.id) || `progress-note-${createdAt}-${index}`,
+    content,
+    sourceMessageIds: Array.isArray(note.sourceMessageIds)
+      ? note.sourceMessageIds.map(normalizeText).filter(Boolean)
+      : [],
+    createdAt,
+    confidence:
+      typeof note.confidence === "number" && Number.isFinite(note.confidence)
+        ? Math.min(Math.max(note.confidence, 0), 1)
+        : 0,
+    reason: normalizeText(note.reason),
   };
 }
 
@@ -418,6 +453,7 @@ function normalizeMergeHistoryItem(
     addedItems: Array.isArray(history.addedItems)
       ? history.addedItems.map(normalizeText).filter(Boolean)
       : [],
+    progressNote: normalizeText(history.progressNote),
     previousSnapshot,
     newTitle: normalizeText(history.newTitle),
     reason: normalizeText(history.reason),
@@ -443,10 +479,18 @@ function normalizeMergeSnapshot(value: unknown): ArrangementMergeSnapshot | null
     sourceMessageIds: Array.isArray(snapshot.sourceMessageIds)
       ? snapshot.sourceMessageIds.map(normalizeText).filter(Boolean)
       : [],
+    mergedSourceIds: Array.isArray(snapshot.mergedSourceIds)
+      ? snapshot.mergedSourceIds.map(normalizeText).filter(Boolean)
+      : [],
     relatedContexts: Array.isArray(snapshot.relatedContexts)
       ? snapshot.relatedContexts
           .map(normalizeRelatedContext)
           .filter((context): context is ArrangementRelatedContext => Boolean(context))
+      : [],
+    progressNotes: Array.isArray(snapshot.progressNotes)
+      ? snapshot.progressNotes
+          .map(normalizeProgressNote)
+          .filter((note): note is ArrangementProgressNote => Boolean(note))
       : [],
   };
 }
@@ -457,6 +501,9 @@ function normalizeMergeType(value: unknown): ArrangementMergeType {
     value === "update_time" ||
     value === "update_location" ||
     value === "add_context" ||
+    value === "merge_duplicate" ||
+    value === "update_progress" ||
+    value === "remove_context" ||
     value === "ignore"
   ) {
     return value;
@@ -476,6 +523,9 @@ function normalizeArrangement(value: unknown, index: number): ArrangementItem | 
   const sourceMessageIds = Array.isArray(arrangement.sourceMessageIds)
     ? arrangement.sourceMessageIds.map(normalizeText).filter(Boolean)
     : [];
+  const mergedSourceIds = Array.isArray(arrangement.mergedSourceIds)
+    ? arrangement.mergedSourceIds.map(normalizeText).filter(Boolean)
+    : [];
   const relatedPeople = Array.isArray(arrangement.relatedPeople)
     ? arrangement.relatedPeople
         .map(normalizeRelatedPerson)
@@ -485,6 +535,11 @@ function normalizeArrangement(value: unknown, index: number): ArrangementItem | 
     ? arrangement.relatedContexts
         .map(normalizeRelatedContext)
         .filter((context): context is ArrangementRelatedContext => Boolean(context))
+    : [];
+  const progressNotes = Array.isArray(arrangement.progressNotes)
+    ? arrangement.progressNotes
+        .map(normalizeProgressNote)
+        .filter((note): note is ArrangementProgressNote => Boolean(note))
     : [];
   const mergeHistory = Array.isArray(arrangement.mergeHistory)
     ? arrangement.mergeHistory
@@ -508,10 +563,12 @@ function normalizeArrangement(value: unknown, index: number): ArrangementItem | 
       : [],
     sourceType: normalizeSourceType(arrangement.sourceType),
     sourceMessageIds,
+    mergedSourceIds,
     ...(normalizeSourceContext(arrangement.sourceContext)
       ? { sourceContext: normalizeSourceContext(arrangement.sourceContext) }
       : {}),
     relatedContexts,
+    progressNotes,
     mergeHistory,
     relatedPeople,
     reminder: normalizeReminder(arrangement.reminder),
@@ -555,7 +612,9 @@ export function createArrangement(draft: ArrangementDraft): ArrangementItem | nu
     items: [],
     sourceType: "manual",
     sourceMessageIds: [],
+    mergedSourceIds: [],
     relatedContexts: [],
+    progressNotes: [],
     mergeHistory: [],
     relatedPeople: [],
     reminder,
@@ -605,6 +664,7 @@ export function createArrangementFromAICandidate(
     items: uniqueTextValues(result.arrangement.items),
     sourceType: sourceScene,
     sourceMessageIds,
+    mergedSourceIds: [],
     sourceContext: {
       sourceType: sourceScene,
       sourceLabel: normalizeText(source.sourceLabel) || getDefaultAISourceLabel(sourceScene),
@@ -631,6 +691,7 @@ export function createArrangementFromAICandidate(
       ...(source.candidateId ? { candidateId: source.candidateId } : {}),
     },
     relatedContexts: buildInitialRelatedContexts(source, timestamp),
+    progressNotes: [],
     mergeHistory: [],
     relatedPeople: result.arrangement.relatedPeople.map((name, index) => ({
       id: `ai-person-${timestamp}-${index}`,
@@ -761,9 +822,7 @@ export function mergeArrangementSupplement(
 
   const updatedArrangements = arrangements.map((arrangement) => {
     if (arrangement.id !== source.targetArrangementId) return arrangement;
-    if (arrangement.status !== "pending" || arrangement.sourceType !== "private_chat") {
-      return arrangement;
-    }
+    if (arrangement.status === "ignored") return arrangement;
 
     const normalizedSourceMessageIds = uniqueTextValues([
       source.sourceMessageId,
@@ -772,7 +831,8 @@ export function mergeArrangementSupplement(
     if (
       normalizedSourceMessageIds.length === 0 ||
       normalizedSourceMessageIds.every((messageId) =>
-        arrangement.sourceMessageIds.includes(messageId)
+        arrangement.sourceMessageIds.includes(messageId) ||
+        arrangement.mergedSourceIds.includes(messageId)
       )
     ) {
       return arrangement;
@@ -783,6 +843,16 @@ export function mergeArrangementSupplement(
     const nextRelatedContexts = mergeRelatedContexts(
       arrangement.relatedContexts,
       source.sourceMessages,
+      timestamp
+    );
+    const nextProgressNotes = mergeProgressNotes(
+      arrangement.progressNotes,
+      {
+        content: normalizeText(source.progressNote),
+        sourceMessageIds: normalizedSourceMessageIds,
+        confidence: source.confidence,
+        reason: source.reason,
+      },
       timestamp
     );
     const updatedTimeFields = buildTimeFieldsFromMerge(source.updatedFields, arrangement);
@@ -798,6 +868,7 @@ export function mergeArrangementSupplement(
       confidence: source.confidence,
       sourceMessageIds: normalizedSourceMessageIds,
       addedItems: uniqueTextValues(source.addedItems),
+      progressNote: normalizeText(source.progressNote),
       previousSnapshot,
       newTitle: nextTitle,
       reason: normalizeText(source.reason),
@@ -811,6 +882,10 @@ export function mergeArrangementSupplement(
       items: nextItems,
       sourceMessageIds: uniqueTextValues([
         ...arrangement.sourceMessageIds,
+        ...normalizedSourceMessageIds,
+      ]),
+      mergedSourceIds: uniqueTextValues([
+        ...arrangement.mergedSourceIds,
         ...normalizedSourceMessageIds,
       ]),
       sourceContext: arrangement.sourceContext
@@ -827,6 +902,7 @@ export function mergeArrangementSupplement(
           }
         : arrangement.sourceContext,
       relatedContexts: nextRelatedContexts,
+      progressNotes: nextProgressNotes,
       mergeHistory: [...arrangement.mergeHistory, historyItem],
       updatedAt: timestamp,
     };
@@ -865,7 +941,9 @@ export function undoLastArrangementMerge(arrangementId: string): ArrangementItem
       location: snapshot.location,
       items: snapshot.items,
       sourceMessageIds: snapshot.sourceMessageIds,
+      mergedSourceIds: snapshot.mergedSourceIds,
       relatedContexts: snapshot.relatedContexts,
+      progressNotes: snapshot.progressNotes,
       mergeHistory: previousMergeHistory,
       updatedAt: Date.now(),
     };
@@ -877,6 +955,70 @@ export function undoLastArrangementMerge(arrangementId: string): ArrangementItem
   if (!updatedArrangement) return null;
   persistArrangements(updatedArrangements);
   return updatedArrangement;
+}
+
+export function removeArrangementRelatedContext(
+  arrangementId: string,
+  contextId: string,
+  reason = "移除相关上下文"
+): ArrangementItem | null {
+  const arrangements = getInitialArrangements();
+  let updatedArrangement: ArrangementItem | null = null;
+
+  const updatedArrangements = arrangements.map((arrangement) => {
+    if (arrangement.id !== arrangementId) return arrangement;
+
+    const context = arrangement.relatedContexts.find((item) => item.id === contextId);
+    if (!context) return arrangement;
+
+    const timestamp = Date.now();
+    const previousSnapshot = createMergeSnapshot(arrangement);
+    const nextSourceMessageIds = arrangement.sourceMessageIds.filter(
+      (messageId) => messageId !== context.messageId
+    );
+    const nextMergedSourceIds = arrangement.mergedSourceIds.filter(
+      (messageId) => messageId !== context.messageId
+    );
+    const nextProgressNotes = arrangement.progressNotes.filter(
+      (note) => !note.sourceMessageIds.includes(context.messageId)
+    );
+    const historyItem: ArrangementMergeHistoryItem = {
+      id: `arrangement-merge-${timestamp}`,
+      mergeType: "remove_context",
+      mergedAt: timestamp,
+      confidence: 1,
+      sourceMessageIds: [context.messageId],
+      addedItems: [],
+      progressNote: context.role === "progress" ? context.content : "",
+      previousSnapshot,
+      newTitle: arrangement.title,
+      reason: normalizeText(reason),
+    };
+
+    const nextArrangement: ArrangementItem = {
+      ...arrangement,
+      sourceMessageIds: nextSourceMessageIds,
+      mergedSourceIds: nextMergedSourceIds,
+      relatedContexts: arrangement.relatedContexts.filter((item) => item.id !== contextId),
+      progressNotes: nextProgressNotes,
+      mergeHistory: [...arrangement.mergeHistory, historyItem],
+      updatedAt: timestamp,
+    };
+
+    updatedArrangement = nextArrangement;
+    return nextArrangement;
+  });
+
+  if (!updatedArrangement) return null;
+  persistArrangements(updatedArrangements);
+  return updatedArrangement;
+}
+
+export function markArrangementContextNotSame(
+  arrangementId: string,
+  contextId: string
+): ArrangementItem | null {
+  return removeArrangementRelatedContext(arrangementId, contextId, "不是同一件事");
 }
 
 function buildArrangementTimeFields(draft: ArrangementDraft): Pick<
@@ -1125,7 +1267,9 @@ function createMergeSnapshot(arrangement: ArrangementItem): ArrangementMergeSnap
     location: arrangement.location,
     items: [...arrangement.items],
     sourceMessageIds: [...arrangement.sourceMessageIds],
+    mergedSourceIds: [...arrangement.mergedSourceIds],
     relatedContexts: arrangement.relatedContexts.map((context) => ({ ...context })),
+    progressNotes: arrangement.progressNotes.map((note) => ({ ...note })),
   };
 }
 
@@ -1156,6 +1300,42 @@ function mergeRelatedContexts(
   });
 
   return nextContexts;
+}
+
+function mergeProgressNotes(
+  existingNotes: ArrangementProgressNote[],
+  note: {
+    content: string;
+    sourceMessageIds: string[];
+    confidence: number;
+    reason: string;
+  },
+  timestamp: number
+) {
+  const content = normalizeText(note.content);
+  if (!content) return existingNotes;
+
+  const sourceMessageIds = uniqueTextValues(note.sourceMessageIds);
+  const alreadyExists = existingNotes.some(
+    (existingNote) =>
+      existingNote.content === content ||
+      sourceMessageIds.some((messageId) =>
+        existingNote.sourceMessageIds.includes(messageId)
+      )
+  );
+  if (alreadyExists) return existingNotes;
+
+  return [
+    ...existingNotes,
+    {
+      id: `progress-note-${timestamp}`,
+      content,
+      sourceMessageIds,
+      createdAt: timestamp,
+      confidence: Math.min(Math.max(note.confidence, 0), 1),
+      reason: normalizeText(note.reason),
+    },
+  ];
 }
 
 function buildTimeFieldsFromMerge(
@@ -1327,8 +1507,16 @@ export function hasArrangementForSourceMessage(sourceMessageId: string) {
   const normalizedSourceMessageId = normalizeText(sourceMessageId);
   if (!normalizedSourceMessageId) return false;
 
-  return getInitialArrangements().some((arrangement) =>
-    arrangement.sourceMessageIds.includes(normalizedSourceMessageId)
+  return getInitialArrangements().some(
+    (arrangement) =>
+      arrangement.sourceMessageIds.includes(normalizedSourceMessageId) ||
+      arrangement.mergedSourceIds.includes(normalizedSourceMessageId) ||
+      arrangement.relatedContexts.some(
+        (context) => context.messageId === normalizedSourceMessageId
+      ) ||
+      arrangement.progressNotes.some((note) =>
+        note.sourceMessageIds.includes(normalizedSourceMessageId)
+      )
   );
 }
 

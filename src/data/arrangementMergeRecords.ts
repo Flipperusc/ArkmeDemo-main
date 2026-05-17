@@ -2,7 +2,7 @@ import type {
   ArrangementAIMergeSourceMessage,
 } from "@/data/arrangements";
 import type {
-  PrivateChatSupplementMergeResult,
+  ArrangementAIMergeCandidateResult,
 } from "@/types/arrangementAI";
 
 export const arrangementAIMergeCandidatesStorageKey =
@@ -27,7 +27,7 @@ export type ArrangementAIMergeCandidateRecord = {
   targetArrangementId: string;
   detectedAt: number;
   confidence: number;
-  result: PrivateChatSupplementMergeResult;
+  result: ArrangementAIMergeCandidateResult;
   status: ArrangementAIMergeCandidateStatus;
   updatedAt: number;
 };
@@ -111,7 +111,7 @@ function normalizeMergeCandidate(value: unknown): ArrangementAIMergeCandidateRec
   const targetArrangementId = normalizeText(value.targetArrangementId);
   const detectedAt = normalizeTimestamp(value.detectedAt);
   const result = isPlainObject(value.result)
-    ? (value.result as PrivateChatSupplementMergeResult)
+    ? (value.result as ArrangementAIMergeCandidateResult)
     : null;
   if (!sourceMessageId || !sourceText || !targetArrangementId || !detectedAt || !result) {
     return null;

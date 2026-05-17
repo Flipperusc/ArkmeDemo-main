@@ -50,7 +50,8 @@ export type ArrangementSourceContext = {
 export type ArrangementRelatedContextRole =
   | "request"
   | "commitment"
-  | "supplement";
+  | "supplement"
+  | "progress";
 
 export type ArrangementRelatedContext = {
   id: string;
@@ -67,7 +68,19 @@ export type ArrangementMergeType =
   | "update_time"
   | "update_location"
   | "add_context"
+  | "merge_duplicate"
+  | "update_progress"
+  | "remove_context"
   | "ignore";
+
+export type ArrangementProgressNote = {
+  id: string;
+  content: string;
+  sourceMessageIds: string[];
+  createdAt: number;
+  confidence: number;
+  reason: string;
+};
 
 export type ArrangementMergeSnapshot = Pick<
   ArrangementItem,
@@ -81,7 +94,9 @@ export type ArrangementMergeSnapshot = Pick<
   | "location"
   | "items"
   | "sourceMessageIds"
+  | "mergedSourceIds"
   | "relatedContexts"
+  | "progressNotes"
 >;
 
 export type ArrangementMergeHistoryItem = {
@@ -91,6 +106,7 @@ export type ArrangementMergeHistoryItem = {
   confidence: number;
   sourceMessageIds: string[];
   addedItems: string[];
+  progressNote: string;
   previousSnapshot: ArrangementMergeSnapshot;
   newTitle: string;
   reason: string;
@@ -116,8 +132,10 @@ export type ArrangementItem = {
   items: string[];
   sourceType: ArrangementSourceType;
   sourceMessageIds: string[];
+  mergedSourceIds: string[];
   sourceContext?: ArrangementSourceContext;
   relatedContexts: ArrangementRelatedContext[];
+  progressNotes: ArrangementProgressNote[];
   mergeHistory: ArrangementMergeHistoryItem[];
   relatedPeople: ArrangementRelatedPerson[];
   reminder: ArrangementReminder;

@@ -12,10 +12,21 @@ import {
 } from "@/data/arrangementAIRecords";
 import {
   createArrangementFromAICandidate,
+  getInitialArrangements,
   hasArrangementForSourceMessage,
+  mergeArrangementSupplement,
 } from "@/data/arrangements";
+import {
+  hasProcessedArrangementMergeMessage,
+  saveArrangementAIMergeCandidate,
+  updateArrangementAIMergeCandidateStatus,
+} from "@/data/arrangementMergeRecords";
 import { getAISettings } from "@/services/aiSettings";
 import { analyzeArrangementCandidate } from "@/services/arrangementAIService";
+import {
+  analyzeArrangementSimilarityMerge,
+  selectSimilarArrangementMergeCandidates,
+} from "@/services/arrangementSimilarityMergeService";
 import type { AISettings } from "@/types/ai";
 import type {
   ArrangementAIScene,
@@ -195,6 +206,97 @@ export async function runArrangementBackfill(
         });
         result.ignored += 1;
         continue;
+      }
+
+      if (
+        target.scene !== "group_chat" &&
+        !hasProcessedArrangementMergeMessage(target.id)
+      ) {
+        const candidateArrangements = selectSimilarArrangementMergeCandidates({
+          arrangements: getInitialArrangements(),
+          sourceType: target.scene,
+          sourceLabel: target.conversationLabel,
+          sourceText: target.content,
+          candidateResult,
+          now: Date.now(),
+        });
+
+        if (candidateArrangements.length > 0) {
+          const detectedAt = Date.now();
+          const sourceMessage = {
+            id: target.id,
+            senderId: target.senderId,
+            senderName: target.senderName,
+            content: target.content,
+            createdAt: new Date(target.createdAt).toISOString(),
+          };
+          const mergeResult = await analyzeArrangementSimilarityMerge({
+            currentUserId: "self",
+            currentUserName: "我",
+            sourceType: target.scene,
+            sourceLabel: target.conversationLabel,
+            sourceMessageId: target.id,
+            sourceText: target.content,
+            sourceMessages: [sourceMessage],
+            candidateResult,
+            candidateArrangements,
+            timezone: getRuntimeTimezone(),
+            now: new Date(detectedAt).toISOString(),
+          });
+
+          if (mergeResult.ok && mergeResult.data.shouldMerge) {
+            const mergeCandidate = saveArrangementAIMergeCandidate({
+              sourceMessageId: target.id,
+              sourceMessageIds: mergeResult.data.sourceMessageIds,
+              sourceText: target.content,
+              sourceLabel: target.conversationLabel,
+              sourceMessages: [
+                {
+                  id: target.id,
+                  role:
+                    mergeResult.data.mergeAction === "update_progress"
+                      ? "progress"
+                      : "supplement",
+                  senderName: target.senderName,
+                  content: target.content,
+                  createdAt: target.createdAt,
+                },
+              ],
+              targetArrangementId: mergeResult.data.targetArrangementId,
+              detectedAt,
+              confidence: mergeResult.data.confidence,
+              result: mergeResult.data,
+              status: "pending",
+            });
+
+            if (mergeResult.data.confidence >= 0.8) {
+              const arrangement = mergeArrangementSupplement({
+                targetArrangementId: mergeResult.data.targetArrangementId,
+                mergeType: mergeResult.data.mergeAction,
+                sourceMessageId: target.id,
+                sourceMessageIds: mergeResult.data.sourceMessageIds,
+                sourceText: target.content,
+                sourceMessages: mergeCandidate.sourceMessages,
+                addedItems: [],
+                progressNote: mergeResult.data.progressNote,
+                updatedFields: mergeResult.data.updatedFields,
+                newTitle: "",
+                detectedAt,
+                confidence: mergeResult.data.confidence,
+                reason: mergeResult.data.reason,
+              });
+              updateArrangementAIMergeCandidateStatus(
+                mergeCandidate.id,
+                arrangement ? "auto_merged" : "ignored"
+              );
+              result.skipped += 1;
+              continue;
+            }
+
+            result.pending += 1;
+            continue;
+          }
+        }
       }
 
       const candidate = saveArrangementAICandidate({

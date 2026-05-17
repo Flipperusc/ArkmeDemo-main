@@ -152,3 +152,40 @@ export type PrivateChatSupplementMergeResult = {
   reason: string;
   needsUserConfirmation: boolean;
 };
+
+export type ArrangementSimilarityMergeAction =
+  | "merge_duplicate"
+  | "add_context"
+  | "update_progress"
+  | "update_time"
+  | "ignore";
+
+export type ArrangementSimilarityMergeInput = {
+  currentUserId: string;
+  currentUserName?: string;
+  sourceType: ArrangementAIScene;
+  sourceLabel: string;
+  sourceMessageId: string;
+  sourceText: string;
+  sourceMessages: ArrangementAIMessage[];
+  candidateResult?: ArrangementCandidateResult;
+  candidateArrangements: ArrangementItem[];
+  timezone?: string;
+  now: string;
+};
+
+export type ArrangementSimilarityMergeResult = {
+  shouldMerge: boolean;
+  confidence: number;
+  targetArrangementId: string;
+  mergeAction: ArrangementSimilarityMergeAction;
+  progressNote: string;
+  updatedFields: Record<string, unknown>;
+  sourceMessageIds: string[];
+  reason: string;
+  needsUserConfirmation: boolean;
+};
+
+export type ArrangementAIMergeCandidateResult =
+  | PrivateChatSupplementMergeResult
+  | ArrangementSimilarityMergeResult;
