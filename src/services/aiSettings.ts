@@ -1,8 +1,8 @@
 import {
+  DEFAULT_DEEPSEEK_BASE_URL,
+  DEFAULT_DEEPSEEK_MAX_TOKENS,
+  DEFAULT_DEEPSEEK_MODEL,
   defaultAISettings,
-  deepseekDefaultBaseUrl,
-  deepseekDefaultMaxTokens,
-  deepseekDefaultModel,
   type AIServiceError,
   type AIServiceResult,
   type AISettings,
@@ -173,12 +173,12 @@ function normalizeAISettings(input: Partial<StoredAISettings>): AISettings {
 }
 
 function normalizeBaseUrl(value: unknown) {
-  if (typeof value !== "string" || !value.trim()) return deepseekDefaultBaseUrl;
+  if (typeof value !== "string" || !value.trim()) return DEFAULT_DEEPSEEK_BASE_URL;
   return value.trim().replace(/\/+$/, "");
 }
 
 function normalizeModel(value: unknown) {
-  if (typeof value !== "string" || !value.trim()) return deepseekDefaultModel;
+  if (typeof value !== "string" || !value.trim()) return DEFAULT_DEEPSEEK_MODEL;
   return value.trim();
 }
 
@@ -192,6 +192,6 @@ function normalizeReasoningEffort(value: unknown): AIReasoningEffort {
 
 function normalizeMaxTokens(value: unknown) {
   const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) return deepseekDefaultMaxTokens;
+  if (!Number.isFinite(numericValue)) return DEFAULT_DEEPSEEK_MAX_TOKENS;
   return Math.min(Math.max(Math.round(numericValue), 256), 8000);
 }

@@ -3,7 +3,11 @@ import {
   buildPrivateChatCommitmentPrompt,
 } from "@/services/privateChatCommitmentPrompt";
 import { emptyArrangementCandidate } from "@/services/arrangementAIPrompt";
-import type { AIServiceResult } from "@/types/ai";
+import {
+  DEFAULT_THINKING_MODE,
+  PRIVATE_COMMITMENT_JSON_MAX_TOKENS,
+  type AIServiceResult,
+} from "@/types/ai";
 import type {
   ArrangementAIAction,
   ArrangementAITimeType,
@@ -47,8 +51,8 @@ export async function analyzePrivateChatCommitment(
   const callJSON = options.callJSON ?? callDeepSeekJSON;
   const response = await callJSON<unknown>({
     ...prompt,
-    maxTokens: 2000,
-    thinkingMode: "disabled",
+    maxTokens: PRIVATE_COMMITMENT_JSON_MAX_TOKENS,
+    thinkingMode: DEFAULT_THINKING_MODE,
   });
 
   if (!response.ok) {

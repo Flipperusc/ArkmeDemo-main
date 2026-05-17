@@ -23,9 +23,20 @@ import {
   type ArrangementAIFeedbackAction,
 } from "@/data/arrangementAIRecords";
 import {
+  arrangementAIMergeCandidatesStorageKey,
+  arrangementAIMergeRecordsStorageEvent,
+  getPendingArrangementAIMergeCandidates,
+  hasProcessedArrangementMergeMessage,
+  saveArrangementAIMergeCandidate,
+  updateArrangementAIMergeCandidateStatus,
+  type ArrangementAIMergeCandidateRecord,
+} from "@/data/arrangementMergeRecords";
+import {
   createArrangementFromAICandidate,
   getInitialArrangements,
   hasArrangementForSourceMessage,
+  mergeArrangementSupplement,
+  type ArrangementAIMergeSourceMessage,
 } from "@/data/arrangements";
 import { useCandidateProfile } from "@/data/candidateProfile";
 import {
@@ -59,6 +70,11 @@ import {
   convertPrivateCommitmentToArrangementCandidate,
 } from "@/services/privateChatCommitmentAIService";
 import {
+  analyzePrivateChatSupplementMerge,
+  privateChatSupplementMergeContextLimit,
+  privateChatSupplementMergeWindowMs,
+} from "@/services/privateChatSupplementMergeAIService";
+import {
   accentColorOptions,
   getLocaleDisplayName,
   supportedLocales,
@@ -72,8 +88,10 @@ import {
 import type { PageType } from "@/App";
 import type {
   ArrangementCandidateResult,
+  PrivateChatSupplementMergeResult,
   PrivateChatCommitmentResult,
 } from "@/types/arrangementAI";
+import type { ArrangementItem } from "@/types/arrangement";
 import type { RecordItem, RecordReference, RecordSourceConversation } from "@/types/record";
 
 type HomeProps = {
@@ -389,6 +407,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   );
   const [pendingArrangementCandidates, setPendingArrangementCandidates] =
     React.useState(getPendingArrangementAICandidates);
+  const [pendingArrangementMergeCandidates, setPendingArrangementMergeCandidates] =
+    React.useState(getPendingArrangementAIMergeCandidates);
   const [testIdentities, setTestIdentities] = React.useState(getInitialTestIdentities);
   const [testGroups, setTestGroups] = React.useState(getInitialTestGroups);
   const [testMessages, setTestMessages] = React.useState(getInitialTestMessages);
@@ -781,6 +801,18 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       );
     });
   }, [activeTestConversationSummary, pendingArrangementCandidates]);
+  const pendingPrivateArrangementMergeCandidates = React.useMemo(() => {
+    if (!activeTestConversationSummary) return [];
+    const messageIds = new Set(
+      activeTestConversationSummary.records.map((record) =>
+        record.uid.startsWith("test-") ? record.uid.slice(5) : record.uid
+      )
+    );
+
+    return pendingArrangementMergeCandidates.filter((candidate) =>
+      candidate.sourceMessageIds.some((sourceMessageId) => messageIds.has(sourceMessageId))
+    );
+  }, [activeTestConversationSummary, pendingArrangementMergeCandidates]);
 
   const mineStatisticRecords = React.useMemo(
     () => [
@@ -817,13 +849,19 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
 
   const refreshPendingArrangementCandidates = React.useCallback(() => {
     setPendingArrangementCandidates(getPendingArrangementAICandidates());
+    setPendingArrangementMergeCandidates(getPendingArrangementAIMergeCandidates());
   }, []);
 
   React.useEffect(() => {
     if (typeof window === "undefined") return;
 
     const handleStorage = (event: StorageEvent) => {
-      if (event.key !== arrangementAICandidatesStorageKey) return;
+      if (
+        event.key !== arrangementAICandidatesStorageKey &&
+        event.key !== arrangementAIMergeCandidatesStorageKey
+      ) {
+        return;
+      }
       refreshPendingArrangementCandidates();
     };
 
@@ -832,10 +870,18 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       arrangementAIRecordsStorageEvent,
       refreshPendingArrangementCandidates
     );
+    window.addEventListener(
+      arrangementAIMergeRecordsStorageEvent,
+      refreshPendingArrangementCandidates
+    );
     return () => {
       window.removeEventListener("storage", handleStorage);
       window.removeEventListener(
         arrangementAIRecordsStorageEvent,
+        refreshPendingArrangementCandidates
+      );
+      window.removeEventListener(
+        arrangementAIMergeRecordsStorageEvent,
         refreshPendingArrangementCandidates
       );
     };
@@ -921,6 +967,123 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       }
     },
     [candidateProfile?.name]
+  );
+
+  const triggerPrivateSupplementMergeDetection = React.useCallback(
+    async (
+      summary: TestConversationSummary,
+      reply: TestMessage,
+      allMessages: TestMessage[]
+    ) => {
+      try {
+        if (summary.conversationType !== "private") return false;
+        const content = reply.text.trim();
+        if (!content) return false;
+        if (
+          hasArrangementForSourceMessage(reply.id) ||
+          hasProcessedArrangementMergeMessage(reply.id)
+        ) {
+          return true;
+        }
+
+        const settings = await getAISettings();
+        if (!settings.enableAI || !settings.hasApiKey) return false;
+
+        const contextMessages = getPrivateContextMessages(
+          allMessages,
+          summary.conversationId,
+          privateChatSupplementMergeContextLimit
+        );
+        if (contextMessages.length < 2) return false;
+
+        const candidateArrangements = getPrivateSupplementMergeCandidates(
+          summary,
+          contextMessages,
+          reply
+        );
+        if (candidateArrangements.length === 0) return false;
+
+        const detectedAt = Date.now();
+        const selfName = candidateProfile?.name || "我";
+        const otherUserId = summary.identity?.id || summary.conversationId;
+        const otherUserName = summary.identity?.name || summary.title;
+        const inputMessages = buildPrivateAIInputMessages(
+          contextMessages,
+          selfName,
+          otherUserName,
+          testIdentities
+        );
+        const currentMessage = inputMessages.find((message) => message.id === reply.id);
+        if (!currentMessage) return false;
+
+        const result = await analyzePrivateChatSupplementMerge({
+          currentUserId: demoSenderIdentityId,
+          currentUserName: selfName,
+          otherUserId,
+          otherUserName,
+          currentMessage,
+          messages: inputMessages,
+          candidateArrangements,
+          timezone: getRuntimeTimezone(),
+          now: new Date(detectedAt).toISOString(),
+        });
+
+        if (!result.ok) return false;
+
+        const mergeResult = result.data;
+        if (!mergeResult.shouldMerge || mergeResult.confidence < 0.5) {
+          return false;
+        }
+
+        const mergeSource = buildPrivateSupplementMergeSource({
+          result: mergeResult,
+          reply,
+          contextMessages,
+          selfName,
+          otherName: otherUserName,
+        });
+        const candidate = saveArrangementAIMergeCandidate({
+          sourceMessageId: reply.id,
+          sourceMessageIds: mergeSource.sourceMessageIds,
+          sourceText: mergeSource.sourceText,
+          sourceLabel: `和 ${otherUserName} 的私聊`,
+          sourceMessages: mergeSource.sourceMessages,
+          targetArrangementId: mergeResult.targetArrangementId,
+          detectedAt,
+          confidence: mergeResult.confidence,
+          result: mergeResult,
+          status: "pending",
+        });
+
+        if (mergeResult.confidence >= 0.8) {
+          const arrangement = mergeArrangementSupplement({
+            targetArrangementId: mergeResult.targetArrangementId,
+            mergeType: mergeResult.mergeType,
+            sourceMessageId: reply.id,
+            sourceMessageIds: mergeSource.sourceMessageIds,
+            sourceText: mergeSource.sourceText,
+            sourceMessages: mergeSource.sourceMessages,
+            addedItems: mergeResult.addedItems,
+            updatedFields: mergeResult.updatedFields,
+            newTitle: mergeResult.newTitle,
+            detectedAt,
+            confidence: mergeResult.confidence,
+            reason: mergeResult.reason,
+          });
+
+          if (arrangement) {
+            updateArrangementAIMergeCandidateStatus(candidate.id, "auto_merged");
+            refreshPendingArrangementCandidates();
+          }
+        }
+
+        return true;
+      } catch {
+        // Supplement merge detection must not interrupt private chat sending.
+        return false;
+      }
+    },
+    [candidateProfile?.name, refreshPendingArrangementCandidates, testIdentities]
   );
 
   const triggerPrivateCommitmentDetection = React.useCallback(
@@ -1118,6 +1281,40 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     ) => {
       updateArrangementAICandidateStatus(candidate.id, action);
       recordArrangementCandidateFeedback(candidate, action);
+      refreshPendingArrangementCandidates();
+    },
+    [refreshPendingArrangementCandidates]
+  );
+
+  const commitArrangementMergeCandidate = React.useCallback(
+    (candidate: ArrangementAIMergeCandidateRecord) => {
+      const arrangement = mergeArrangementSupplement({
+        targetArrangementId: candidate.targetArrangementId,
+        mergeType: candidate.result.mergeType,
+        sourceMessageId: candidate.sourceMessageId,
+        sourceMessageIds: candidate.sourceMessageIds,
+        sourceText: candidate.sourceText,
+        sourceMessages: candidate.sourceMessages,
+        addedItems: candidate.result.addedItems,
+        updatedFields: candidate.result.updatedFields,
+        newTitle: candidate.result.newTitle,
+        detectedAt: candidate.detectedAt,
+        confidence: candidate.confidence,
+        reason: candidate.result.reason,
+      });
+
+      updateArrangementAIMergeCandidateStatus(
+        candidate.id,
+        arrangement ? "confirmed" : "ignored"
+      );
+      refreshPendingArrangementCandidates();
+    },
+    [refreshPendingArrangementCandidates]
+  );
+
+  const ignoreArrangementMergeCandidate = React.useCallback(
+    (candidate: ArrangementAIMergeCandidateRecord) => {
+      updateArrangementAIMergeCandidateStatus(candidate.id, "ignored");
       refreshPendingArrangementCandidates();
     },
     [refreshPendingArrangementCandidates]
@@ -1384,9 +1581,23 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       markTestConversationAsRead(summary.conversationId);
       setTestConversationTargetUid(`test-${reply.id}`);
 
-      void triggerPrivateCommitmentDetection(summary, reply, nextMessages);
+      void (async () => {
+        const handledByMerge = await triggerPrivateSupplementMergeDetection(
+          summary,
+          reply,
+          nextMessages
+        );
+        if (!handledByMerge) {
+          await triggerPrivateCommitmentDetection(summary, reply, nextMessages);
+        }
+      })();
     },
-    [markTestConversationAsRead, testMessages, triggerPrivateCommitmentDetection]
+    [
+      markTestConversationAsRead,
+      testMessages,
+      triggerPrivateCommitmentDetection,
+      triggerPrivateSupplementMergeDetection,
+    ]
   );
 
   const openSourceConversation = React.useCallback(
@@ -1502,6 +1713,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
           pendingArrangementCandidates={pendingPrivateArrangementCandidates}
+          pendingArrangementMergeCandidates={pendingPrivateArrangementMergeCandidates}
           onConfirmArrangementCandidate={(candidate) =>
             commitArrangementCandidate(candidate, "confirmed")
           }
@@ -1514,6 +1726,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onMarkArrangementCandidateWrong={(candidate) =>
             ignoreArrangementCandidate(candidate, "wrong")
           }
+          onConfirmArrangementMergeCandidate={commitArrangementMergeCandidate}
+          onIgnoreArrangementMergeCandidate={ignoreArrangementMergeCandidate}
           onCreateReply={(content) => createTestReply(activeTestConversationSummary, content)}
         />
       );
@@ -2904,6 +3118,55 @@ function SelfArrangementCandidateCard({
   );
 }
 
+function ArrangementMergeCandidateCard({
+  candidate,
+  onConfirm,
+  onIgnore,
+}: {
+  candidate: ArrangementAIMergeCandidateRecord;
+  onConfirm: () => void;
+  onIgnore: () => void;
+}) {
+  const { t } = usePreferences();
+  const confidenceLabel = `${Math.round(candidate.confidence * 100)}%`;
+
+  return (
+    <section className="rounded-[16px] border border-[var(--record-card-border)] bg-surface px-3 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+      <p className="text-[13px] font-semibold leading-5 text-text">
+        {t("arrangementAI.mergeConfirmTitle")}
+      </p>
+      <p className="mt-1 break-words text-[14px] leading-5 text-text">
+        {candidate.result.newTitle || candidate.sourceText}
+      </p>
+      <p className="mt-1 text-[12px] leading-5 text-text-tertiary">
+        {candidate.result.addedItems.length > 0
+          ? candidate.result.addedItems.join("、")
+          : t("arrangementAI.mergeContextOnly")}{" "}
+        · {confidenceLabel}
+      </p>
+      <p className="mt-2 rounded-[12px] bg-surface-muted px-3 py-2 text-[12px] leading-5 text-text-muted">
+        {candidate.sourceText}
+      </p>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          className="rounded-full bg-primary px-3 py-2 text-[12px] font-medium text-on-primary"
+          onClick={onConfirm}
+        >
+          {t("arrangementAI.mergeConfirm")}
+        </button>
+        <button
+          type="button"
+          className="rounded-full bg-surface-muted px-3 py-2 text-[12px] font-medium text-text-muted"
+          onClick={onIgnore}
+        >
+          {t("arrangementAI.mergeIgnore")}
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function TestIdentityConversationChat({
   summary,
   targetUid,
@@ -2911,10 +3174,13 @@ function TestIdentityConversationChat({
   onOpenRecordDetail,
   onOpenRecordSnapshot,
   pendingArrangementCandidates,
+  pendingArrangementMergeCandidates,
   onConfirmArrangementCandidate,
   onEditArrangementCandidate,
   onIgnoreArrangementCandidate,
   onMarkArrangementCandidateWrong,
+  onConfirmArrangementMergeCandidate,
+  onIgnoreArrangementMergeCandidate,
   onCreateReply,
 }: {
   summary: TestConversationSummary;
@@ -2923,6 +3189,7 @@ function TestIdentityConversationChat({
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
   pendingArrangementCandidates: ArrangementAICandidateRecord[];
+  pendingArrangementMergeCandidates: ArrangementAIMergeCandidateRecord[];
   onConfirmArrangementCandidate: (candidate: ArrangementAICandidateRecord) => void;
   onEditArrangementCandidate: (
     candidate: ArrangementAICandidateRecord,
@@ -2930,6 +3197,8 @@ function TestIdentityConversationChat({
   ) => void;
   onIgnoreArrangementCandidate: (candidate: ArrangementAICandidateRecord) => void;
   onMarkArrangementCandidateWrong: (candidate: ArrangementAICandidateRecord) => void;
+  onConfirmArrangementMergeCandidate: (candidate: ArrangementAIMergeCandidateRecord) => void;
+  onIgnoreArrangementMergeCandidate: (candidate: ArrangementAIMergeCandidateRecord) => void;
   onCreateReply: (content: string) => void;
 }) {
   const { resolvedLocale, t } = usePreferences();
@@ -3062,8 +3331,17 @@ function TestIdentityConversationChat({
           })}
         </div>
       </div>
-      {pendingArrangementCandidates.length > 0 && (
+      {(pendingArrangementCandidates.length > 0 ||
+        pendingArrangementMergeCandidates.length > 0) && (
         <div className="shrink-0 space-y-2 border-t border-border-light bg-bg px-3 py-2">
+          {pendingArrangementMergeCandidates.slice(0, 2).map((candidate) => (
+            <ArrangementMergeCandidateCard
+              key={candidate.id}
+              candidate={candidate}
+              onConfirm={() => onConfirmArrangementMergeCandidate(candidate)}
+              onIgnore={() => onIgnoreArrangementMergeCandidate(candidate)}
+            />
+          ))}
           {pendingArrangementCandidates.slice(0, 2).map((candidate) => (
             <SelfArrangementCandidateCard
               key={candidate.id}
@@ -4077,6 +4355,121 @@ function formatSelfArrangementCandidateTime(candidate: ArrangementAICandidateRec
   }
   if (arrangement.timeType === "due" && arrangement.dueTime) return arrangement.dueTime;
   return "";
+}
+
+function getPrivateContextMessages(
+  messages: TestMessage[],
+  conversationId: string,
+  limit: number
+) {
+  return messages
+    .filter(
+      (message) =>
+        message.conversationId === conversationId &&
+        message.conversationType === "private"
+    )
+    .sort((a, b) => a.sentAt - b.sentAt)
+    .slice(-limit);
+}
+
+function getPrivateSupplementMergeCandidates(
+  summary: TestConversationSummary,
+  contextMessages: TestMessage[],
+  reply: TestMessage
+): ArrangementItem[] {
+  const messageIds = new Set(contextMessages.map((message) => message.id));
+  const expectedSourceLabel = `和 ${summary.identity?.name || summary.title} 的私聊`;
+
+  return getInitialArrangements().filter((arrangement) => {
+    if (arrangement.status !== "pending" || arrangement.sourceType !== "private_chat") {
+      return false;
+    }
+    if (arrangement.sourceContext?.sourceLabel !== expectedSourceLabel) return false;
+
+    const hasContextMessage = arrangement.sourceMessageIds.some((messageId) =>
+      messageIds.has(messageId)
+    );
+    const latestSourceTime = getLatestArrangementSourceMessageTime(
+      arrangement,
+      contextMessages
+    );
+    const withinWindow =
+      latestSourceTime !== null
+        ? reply.sentAt - latestSourceTime >= 0 &&
+          reply.sentAt - latestSourceTime <= privateChatSupplementMergeWindowMs
+        : reply.sentAt - arrangement.updatedAt >= 0 &&
+          reply.sentAt - arrangement.updatedAt <= privateChatSupplementMergeWindowMs;
+
+    return hasContextMessage && withinWindow;
+  });
+}
+
+function getLatestArrangementSourceMessageTime(
+  arrangement: ArrangementItem,
+  contextMessages: TestMessage[]
+) {
+  return contextMessages.reduce<number | null>((latest, message) => {
+    if (!arrangement.sourceMessageIds.includes(message.id)) return latest;
+    return Math.max(latest ?? 0, message.sentAt);
+  }, null);
+}
+
+function buildPrivateAIInputMessages(
+  contextMessages: TestMessage[],
+  selfName: string,
+  otherName: string,
+  testIdentities: TestIdentity[]
+) {
+  return contextMessages.map((message) => ({
+    id: message.id,
+    senderId: message.sender === "demo" ? demoSenderIdentityId : message.identityId,
+    senderName:
+      message.sender === "demo"
+        ? selfName
+        : testIdentities.find((identity) => identity.id === message.identityId)?.name ||
+          otherName,
+    content: message.text,
+    createdAt: new Date(message.sentAt).toISOString(),
+  }));
+}
+
+function buildPrivateSupplementMergeSource({
+  result,
+  reply,
+  contextMessages,
+  selfName,
+  otherName,
+}: {
+  result: PrivateChatSupplementMergeResult;
+  reply: TestMessage;
+  contextMessages: TestMessage[];
+  selfName: string;
+  otherName: string;
+}) {
+  const modelSourceIds = new Set([...result.sourceMessageIds, reply.id]);
+  const sourceMessages = contextMessages
+    .filter((message) => modelSourceIds.has(message.id))
+    .map((message): ArrangementAIMergeSourceMessage => ({
+      id: message.id,
+      role: message.sender === "demo" ? "commitment" : "supplement",
+      senderName: message.sender === "demo" ? selfName : otherName,
+      content: message.text,
+      createdAt: message.sentAt,
+    }));
+  const sourceMessageIds = uniqueTextValues([
+    ...Array.from(modelSourceIds),
+    ...sourceMessages.map((message) => message.id),
+  ]);
+
+  return {
+    sourceMessageIds,
+    sourceText: sourceMessages.map(formatMergeSourceMessage).join("\n") || reply.text,
+    sourceMessages,
+  };
+}
+
+function formatMergeSourceMessage(message: ArrangementAIMergeSourceMessage) {
+  return message.senderName ? `${message.senderName}：${message.content}` : message.content;
 }
 
 function buildPrivateCommitmentSource({

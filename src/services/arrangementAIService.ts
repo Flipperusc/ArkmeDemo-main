@@ -3,7 +3,11 @@ import {
   buildArrangementCandidatePrompt,
   emptyArrangementCandidate,
 } from "@/services/arrangementAIPrompt";
-import type { AIServiceResult } from "@/types/ai";
+import {
+  ARRANGEMENT_AI_JSON_MAX_TOKENS,
+  DEFAULT_THINKING_MODE,
+  type AIServiceResult,
+} from "@/types/ai";
 import type {
   ArrangementAIAction,
   ArrangementAITimeType,
@@ -60,8 +64,8 @@ export async function analyzeArrangementCandidate(
   const callJSON = options.callJSON ?? callDeepSeekJSON;
   const response = await callJSON<unknown>({
     ...prompt,
-    maxTokens: 2000,
-    thinkingMode: "disabled",
+    maxTokens: ARRANGEMENT_AI_JSON_MAX_TOKENS,
+    thinkingMode: DEFAULT_THINKING_MODE,
   });
 
   if (!response.ok) {

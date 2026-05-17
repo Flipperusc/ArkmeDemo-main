@@ -1,9 +1,18 @@
-export const deepseekDefaultBaseUrl = "https://api.deepseek.com";
-export const deepseekDefaultModel = "deepseek-v4-pro";
-export const deepseekDefaultMaxTokens = 2000;
-
 export type AIThinkingMode = "disabled" | "enabled";
 export type AIReasoningEffort = "high" | "max";
+
+export const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com";
+export const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro";
+export const DEFAULT_DEEPSEEK_MAX_TOKENS = 2000;
+export const DEFAULT_THINKING_MODE: AIThinkingMode = "disabled";
+export const DEFAULT_REASONING_EFFORT: AIReasoningEffort = "high";
+export const ARRANGEMENT_AI_JSON_MAX_TOKENS = 2000;
+export const PRIVATE_COMMITMENT_JSON_MAX_TOKENS = 2000;
+export const PRIVATE_SUPPLEMENT_MERGE_JSON_MAX_TOKENS = 1600;
+
+export const deepseekDefaultBaseUrl = DEFAULT_DEEPSEEK_BASE_URL;
+export const deepseekDefaultModel = DEFAULT_DEEPSEEK_MODEL;
+export const deepseekDefaultMaxTokens = DEFAULT_DEEPSEEK_MAX_TOKENS;
 
 export type AISettings = {
   enableAI: boolean;
@@ -69,11 +78,11 @@ export type DeepSeekJSONRequest = {
 
 export const defaultAISettings: AISettings = {
   enableAI: false,
-  baseUrl: deepseekDefaultBaseUrl,
-  model: deepseekDefaultModel,
-  thinkingMode: "disabled",
-  reasoningEffort: "high",
-  maxTokens: deepseekDefaultMaxTokens,
+  baseUrl: DEFAULT_DEEPSEEK_BASE_URL,
+  model: DEFAULT_DEEPSEEK_MODEL,
+  thinkingMode: DEFAULT_THINKING_MODE,
+  reasoningEffort: DEFAULT_REASONING_EFFORT,
+  maxTokens: DEFAULT_DEEPSEEK_MAX_TOKENS,
   hasApiKey: false,
   apiKeyPreview: "",
 };

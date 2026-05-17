@@ -5,9 +5,11 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = dirname(fileURLToPath(import.meta.url));
-const deepseekDefaultBaseUrl = "https://api.deepseek.com";
-const deepseekDefaultModel = "deepseek-v4-pro";
-const deepseekDefaultMaxTokens = 2000;
+const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com";
+const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro";
+const DEFAULT_DEEPSEEK_MAX_TOKENS = 2000;
+const DEFAULT_THINKING_MODE: AIThinkingMode = "disabled";
+const DEFAULT_REASONING_EFFORT: AIReasoningEffort = "high";
 
 type AIThinkingMode = "disabled" | "enabled";
 type AIReasoningEffort = "high" | "max";
@@ -37,11 +39,11 @@ type DeepSeekChatResponse = {
 
 const runtimeAISettings: RuntimeAISettings = {
   enableAI: false,
-  baseUrl: process.env.DEEPSEEK_BASE_URL?.trim() || deepseekDefaultBaseUrl,
-  model: process.env.DEEPSEEK_MODEL?.trim() || deepseekDefaultModel,
-  thinkingMode: "disabled",
-  reasoningEffort: "high",
-  maxTokens: deepseekDefaultMaxTokens,
+  baseUrl: process.env.DEEPSEEK_BASE_URL?.trim() || DEFAULT_DEEPSEEK_BASE_URL,
+  model: process.env.DEEPSEEK_MODEL?.trim() || DEFAULT_DEEPSEEK_MODEL,
+  thinkingMode: DEFAULT_THINKING_MODE,
+  reasoningEffort: DEFAULT_REASONING_EFFORT,
+  maxTokens: DEFAULT_DEEPSEEK_MAX_TOKENS,
   apiKey: process.env.DEEPSEEK_API_KEY?.trim() || "",
 };
 
@@ -116,11 +118,11 @@ async function handleDeepSeekProxyRequest(
 
   if (pathname === "/api/ai/deepseek/settings" && req.method === "DELETE") {
     runtimeAISettings.enableAI = false;
-    runtimeAISettings.baseUrl = deepseekDefaultBaseUrl;
-    runtimeAISettings.model = deepseekDefaultModel;
-    runtimeAISettings.thinkingMode = "disabled";
-    runtimeAISettings.reasoningEffort = "high";
-    runtimeAISettings.maxTokens = deepseekDefaultMaxTokens;
+    runtimeAISettings.baseUrl = DEFAULT_DEEPSEEK_BASE_URL;
+    runtimeAISettings.model = DEFAULT_DEEPSEEK_MODEL;
+    runtimeAISettings.thinkingMode = DEFAULT_THINKING_MODE;
+    runtimeAISettings.reasoningEffort = DEFAULT_REASONING_EFFORT;
+    runtimeAISettings.maxTokens = DEFAULT_DEEPSEEK_MAX_TOKENS;
     runtimeAISettings.apiKey = "";
     sendJSON(res, 200, { ok: true, data: toClientAISettings() });
     return;
@@ -420,12 +422,12 @@ function isDeepSeekMessage(value: unknown): value is DeepSeekMessage {
 }
 
 function normalizeBaseUrl(value: unknown) {
-  if (typeof value !== "string" || !value.trim()) return deepseekDefaultBaseUrl;
+  if (typeof value !== "string" || !value.trim()) return DEFAULT_DEEPSEEK_BASE_URL;
   return value.trim().replace(/\/+$/, "");
 }
 
 function normalizeModel(value: unknown) {
-  if (typeof value !== "string" || !value.trim()) return deepseekDefaultModel;
+  if (typeof value !== "string" || !value.trim()) return DEFAULT_DEEPSEEK_MODEL;
   return value.trim();
 }
 
@@ -439,7 +441,7 @@ function normalizeReasoningEffort(value: unknown): AIReasoningEffort {
 
 function normalizeMaxTokens(value: unknown) {
   const numericValue = Number(value);
-  if (!Number.isFinite(numericValue)) return deepseekDefaultMaxTokens;
+  if (!Number.isFinite(numericValue)) return DEFAULT_DEEPSEEK_MAX_TOKENS;
   return Math.min(Math.max(Math.round(numericValue), 256), 8000);
 }
 

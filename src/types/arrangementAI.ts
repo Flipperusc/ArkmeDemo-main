@@ -120,3 +120,35 @@ export type PrivateChatCommitmentResult = {
   reason: string;
   risks: string[];
 };
+
+export type PrivateChatSupplementMergeType =
+  | "add_items"
+  | "update_time"
+  | "update_location"
+  | "add_context"
+  | "ignore";
+
+export type PrivateChatSupplementMergeInput = {
+  currentUserId: string;
+  currentUserName?: string;
+  otherUserId: string;
+  otherUserName?: string;
+  currentMessage: ArrangementAIMessage;
+  messages: ArrangementAIMessage[];
+  candidateArrangements: ArrangementItem[];
+  timezone?: string;
+  now: string;
+};
+
+export type PrivateChatSupplementMergeResult = {
+  shouldMerge: boolean;
+  confidence: number;
+  targetArrangementId: string;
+  mergeType: PrivateChatSupplementMergeType;
+  addedItems: string[];
+  updatedFields: Record<string, unknown>;
+  newTitle: string;
+  sourceMessageIds: string[];
+  reason: string;
+  needsUserConfirmation: boolean;
+};

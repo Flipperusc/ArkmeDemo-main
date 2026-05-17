@@ -681,3 +681,114 @@ Tag URL：`https://github.com/Flipperusc/ArkmeDemo-main/releases/tag/v0.1.0`
 - 已提交并推送 `main`
 - 已创建并推送 `v0.2.0` annotated tag
 - 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-17 20:45:13 CST (+0800)
+
+### 用户输入
+请继续开发「安排」模块 AI 能力：私聊中连续补充内容聚合。要求识别同一私聊上下文里的连续补充，基于 deepseek-v4-pro 与本地规则更新已有安排而不是重复创建；设计保守聚合窗口；AI 输出 shouldMerge、confidence、targetArrangementId、mergeType、addedItems、updatedFields、newTitle、sourceMessageIds 等 JSON；高置信度自动合并，中置信度提示确认，低置信度不合并；详情页展示原始请求、用户答应、后续补充、items 和合并历史；用户至少可以取消最近一次合并；只处理私聊。
+
+### AI 最终输出
+已完成私聊连续补充内容聚合。
+
+聚合窗口设计：新增 `privateChatSupplementMergeWindowMs = 30 * 60 * 1000` 和 `privateChatSupplementMergeContextLimit = 10`，只在同一私聊对象、最近 10 条上下文、已有未完成 `private_chat` 安排、安排来源消息仍在上下文里且距离最近来源消息不超过 30 分钟时进入补充合并判断。
+
+AI 与本地规则分工：本地先做私聊对象、时间窗口、候选安排、重复来源消息等保守过滤；DeepSeek 服务层 `analyzePrivateChatSupplementMerge()` 只判断语义是否属于已有安排补充，并输出结构化 JSON。prompt 位于 `src/services/privateChatSupplementMergePrompt.ts`，明确不同主题、用户拒绝、无法确定目标安排时不合并，默认 thinking disabled。
+
+更新策略：高置信度自动调用 `mergeArrangementSupplement()` 更新 title、items、sourceMessageIds、relatedContexts 和 mergeHistory；中置信度在私聊底部显示「这条消息像是上一条安排的补充，要合并进去吗？」确认卡；低置信度不合并，并允许后续私聊承诺识别继续判断它是否是独立安排。
+
+避免重复创建：私聊回复后先尝试补充合并；如果已合并或进入待确认，就不再走私聊承诺新建逻辑。合并前还会检查来源消息是否已存在于安排或合并候选记录里。
+
+纠错方式：安排详情页展示后续补充和合并历史，新增「取消最近一次合并」入口，使用 mergeHistory 的 previousSnapshot 恢复合并前的 title、items、sourceMessageIds、relatedContexts 和时间/地点字段。
+
+验证方式：`pnpm lint`、`pnpm build`、`pnpm test:arrangement-ai`、`pnpm verify:answer` 均通过。移动端 Demo：`http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- src/types/arrangement.ts
+- src/types/arrangementAI.ts
+- src/services/privateChatSupplementMergePrompt.ts
+- src/services/privateChatSupplementMergeAIService.ts
+- src/data/arrangementMergeRecords.ts
+- src/data/arrangements.ts
+- src/pages/Home.tsx
+- src/pages/Arrangements.tsx
+- src/settings/preferences.ts
+- scripts/test-arrangement-ai.mjs
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `attention.md`
+- `pnpm lint` 通过
+- `pnpm build` 通过
+- `pnpm test:arrangement-ai` 通过
+- `pnpm verify:answer` 通过
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-17 20:56:58 CST (+0800)
+
+### 用户输入
+请对「安排」模块 DeepSeek AI 能力做一次稳定性、成本、隐私和回归测试整理。目标不是增加新功能，而是让 AI 能力更稳定、更可控、更安全。重点检查 DeepSeek 调用安全、成本控制、JSON 稳定性、产品体验、回归测试和代码整理；至少覆盖自聊识别、私聊承诺识别、连续补充合并、相似安排合并、智能完成、群聊相关安排识别、AI 关闭、未配置 Key、空 content、JSON parse 失败；不要重写模块，不引入复杂架构，优先小步修复。
+
+### AI 最终输出
+已完成「安排」模块 DeepSeek AI 能力的稳定性、成本、隐私和回归测试整理。
+
+修复的问题：`callDeepSeekJSON()` 现在在服务层对 AI 关闭和未配置 API Key 做早退，未配置 Key 时不会继续请求 `/api/ai/deepseek/json`；DeepSeek 默认 Base URL、模型、maxTokens、thinking 和 reasoning effort 常量集中到了 `src/types/ai.ts`，本地 Vite 代理也使用同名默认常量，减少硬编码分散。
+
+成本控制优化：安排抽取、私聊承诺、私聊补充合并仍默认 `thinking disabled`，并分别使用集中 token 上限；历史重新识别继续按用户选择的时间、最近条数和对话范围收集目标；私聊连续补充合并保持本地候选筛选后才调用 AI，避免无候选时发起模型请求。
+
+隐私安全处理：页面组件仍只访问设置服务和 AI 服务，不直接拼接 DeepSeek 请求；API Key 只通过设置页提交到同源代理，本地前端缓存只保存脱敏状态；本轮静态扫描没有发现页面层 console/API Key 输出，错误提示保持温和且不包含敏感细节。
+
+回归测试补充：`scripts/test-arrangement-ai.mjs` 新增 AI 关闭不请求 JSON 代理、未配置 Key 不请求 JSON 代理、相似安排 merge 归一化、智能完成类文本不误创建新安排等守卫；现有测试继续覆盖自聊识别、私聊承诺识别、连续补充合并、群聊历史识别、空 content 和 JSON parse 失败 fallback。
+
+剩余技术债：群聊目前主要在历史重新识别路径覆盖，尚未做群聊实时触发；智能完成目前只有“不误创建”的守卫测试，还没有真正的智能完成服务；生产环境仍需要把 Vite 运行时代理替换为正式服务端代理和服务端密钥存储。
+
+验证方式：`pnpm test:arrangement-ai`、`pnpm lint`、`pnpm build`、`pnpm verify:answer` 均通过。移动端 Demo：`http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- src/types/ai.ts
+- src/services/aiSettings.ts
+- src/services/deepseekClient.ts
+- src/services/arrangementAIService.ts
+- src/services/privateChatCommitmentAIService.ts
+- src/services/privateChatSupplementMergeAIService.ts
+- vite.config.ts
+- scripts/test-arrangement-ai.mjs
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `AGENTS.md`、`docs/candidate-rules.md` 和 `attention.md`
+- `pnpm test:arrangement-ai` 通过
+- `pnpm lint` 通过
+- `pnpm build` 通过
+- `pnpm verify:answer` 通过
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-17 21:05:17 CST (+0800)
+
+### 用户输入
+推送
+版本0.2.1：增强稳定性
+
+### AI 最终输出
+已将 ArkmeDemo-main 当前本地改动提交并推送到 GitHub，并创建/推送 `v0.2.1` annotated tag，版本说明为「版本0.2.1：增强稳定性」。
+
+本次推送包含 0.2.0 之后的私聊连续补充聚合、DeepSeek AI 稳定性/成本/隐私/回归测试整理，以及本轮 Codex 记录。推送前已确认上一轮记录存在于当前候选人个人 Markdown 日志和 `src/data/aiConversationLog.ts`，并运行完整校验。
+
+测试入口：移动端 Demo `http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `AGENTS.md`、`docs/candidate-rules.md`、`attention.md`
+- 已读取 `github-push-local` 和 `github-tag-version` 技能说明
+- `pnpm setup:git-hooks` 通过
+- `pnpm verify:answer` 通过
+- 已提交并推送 `main`
+- 已创建并推送 `v0.2.1` annotated tag
+- 未执行云端真实上传：当前环境未提供面试上传环境变量

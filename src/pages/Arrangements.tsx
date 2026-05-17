@@ -8,6 +8,7 @@ import {
   getInitialArrangements,
   ignoreArrangement,
   markArrangementAIWrong,
+  undoLastArrangementMerge,
   updateArrangement,
   updateArrangementStatus,
   type ArrangementDraft,
@@ -196,6 +197,11 @@ export default function Arrangements() {
     setViewMode("list");
   };
 
+  const handleUndoLastMerge = (arrangementId: string) => {
+    undoLastArrangementMerge(arrangementId);
+    refreshArrangements();
+  };
+
   if (viewMode === "create") {
     return (
       <ArrangementFormScreen
@@ -233,6 +239,7 @@ export default function Arrangements() {
         onContinueFocus={() => handleContinueFocus(selectedArrangement.id)}
         onIgnore={() => handleIgnore(selectedArrangement.id)}
         onMarkAIWrong={() => handleMarkAIWrong(selectedArrangement.id)}
+        onUndoLastMerge={() => handleUndoLastMerge(selectedArrangement.id)}
       />
     );
   }
@@ -1004,6 +1011,7 @@ function ArrangementDetailScreen({
   onContinueFocus,
   onIgnore,
   onMarkAIWrong,
+  onUndoLastMerge,
 }: {
   arrangement: ArrangementItem;
   locale: string;
@@ -1016,6 +1024,7 @@ function ArrangementDetailScreen({
   onContinueFocus: () => void;
   onIgnore: () => void;
   onMarkAIWrong: () => void;
+  onUndoLastMerge: () => void;
 }) {
   const { t } = usePreferences();
   const statusMeta = getStatusMeta(arrangement.status, t);
@@ -1088,6 +1097,14 @@ function ArrangementDetailScreen({
             value={formatArrangementReminder(arrangement, locale, t)}
           />
           <DetailRow
+            label={t("arrangements.detailItems")}
+            value={
+              arrangement.items.length > 0
+                ? arrangement.items.join("、")
+                : t("arrangements.detailItemsEmpty")
+            }
+          />
+          <DetailRow
             label={t("arrangements.detailCreatedAt")}
             value={formatFullDateTime(arrangement.createdAt, locale)}
           />
@@ -1133,6 +1150,43 @@ function ArrangementDetailScreen({
                   <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
                     {arrangement.sourceContext.commitmentMessageContent}
                   </p>
+                </div>
+              )}
+              {arrangement.relatedContexts
+                .filter((context) => context.role === "supplement")
+                .map((context) => (
+                  <div
+                    key={context.id}
+                    className="rounded-[14px] bg-surface-muted px-3 py-2"
+                  >
+                    <p className="text-[12px] font-medium leading-5 text-text-tertiary">
+                      {t("arrangements.sourceSupplement")}
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
+                      {context.senderName
+                        ? `${context.senderName}：${context.content}`
+                        : context.content}
+                    </p>
+                  </div>
+                ))}
+              {arrangement.mergeHistory.length > 0 && (
+                <div className="rounded-[14px] bg-surface-muted px-3 py-2">
+                  <p className="text-[12px] font-medium leading-5 text-text-tertiary">
+                    {t("arrangements.mergeHistory")}
+                  </p>
+                  <div className="mt-1 space-y-1">
+                    {arrangement.mergeHistory.map((history) => (
+                      <p
+                        key={history.id}
+                        className="text-[13px] leading-5 text-text-muted"
+                      >
+                        {formatFullDateTime(history.mergedAt, locale)}
+                        {history.addedItems.length > 0
+                          ? ` · ${history.addedItems.join("、")}`
+                          : ""}
+                      </p>
+                    ))}
+                  </div>
                 </div>
               )}
               {arrangement.sourceContext.executor && (
@@ -1235,6 +1289,11 @@ function ArrangementDetailScreen({
           {arrangement.sourceContext && arrangement.sourceContext.sourceType !== "manual" && (
             <Button className="h-11 rounded-full" variant="ghost" onClick={onMarkAIWrong}>
               {t("arrangements.markAIWrong")}
+            </Button>
+          )}
+          {arrangement.mergeHistory.length > 0 && (
+            <Button className="h-11 rounded-full" variant="ghost" onClick={onUndoLastMerge}>
+              {t("arrangements.undoLastMerge")}
             </Button>
           )}
         </div>

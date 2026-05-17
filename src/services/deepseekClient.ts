@@ -4,7 +4,7 @@ import {
   readProxyResult,
 } from "@/services/aiSettings";
 import {
-  deepseekDefaultMaxTokens,
+  DEFAULT_DEEPSEEK_MAX_TOKENS,
   type AIServiceResult,
   type DeepSeekJSONRequest,
 } from "@/types/ai";
@@ -34,6 +34,9 @@ export async function callDeepSeekJSON<T>(
   if (!settings.enableAI) {
     return createAIError("ai_disabled", "AI 识别暂时不可用", false);
   }
+  if (!settings.hasApiKey) {
+    return createAIError("missing_api_key", "未配置 DeepSeek API Key", false);
+  }
 
   try {
     const response = await fetch(`${aiProxyBasePath}/json`, {
@@ -44,7 +47,7 @@ export async function callDeepSeekJSON<T>(
       },
       body: JSON.stringify({
         ...request,
-        maxTokens: request.maxTokens ?? settings.maxTokens ?? deepseekDefaultMaxTokens,
+        maxTokens: request.maxTokens ?? settings.maxTokens ?? DEFAULT_DEEPSEEK_MAX_TOKENS,
         thinkingMode: request.thinkingMode ?? settings.thinkingMode,
         reasoningEffort: request.reasoningEffort ?? settings.reasoningEffort,
       }),

@@ -17,6 +17,12 @@ const {
   analyzePrivateChatCommitment,
   convertPrivateCommitmentToArrangementCandidate,
 } = loadTsModule(path.join(rootDir, "src/services/privateChatCommitmentAIService.ts"));
+const {
+  analyzePrivateChatSupplementMerge,
+} = loadTsModule(path.join(rootDir, "src/services/privateChatSupplementMergeAIService.ts"));
+const { callDeepSeekJSON } = loadTsModule(
+  path.join(rootDir, "src/services/deepseekClient.ts")
+);
 
 const baseInput = {
   scene: "manual_text",
@@ -109,8 +115,12 @@ await runCase(
 
 await runFallbackCase("empty_content");
 await runFallbackCase("json_parse_error");
+await runDeepSeekClientGuardCase();
+await runSimilarArrangementMergeCase();
+await runSmartCompletionGuardCase();
 runSelfChatArrangementCreationCase();
 await runPrivateChatCommitmentCase();
+await runPrivateChatSupplementMergeCase();
 await runArrangementBackfillCase();
 
 console.log("arrangement ai tests passed");
@@ -141,6 +151,117 @@ async function runFallbackCase(code) {
   assert.equal(result.data.hasArrangement, false);
   assert.equal(result.data.action, "ignore");
   assert.ok(result.data.risks.includes(code));
+  assertCompleteShape(result.data);
+}
+
+async function runDeepSeekClientGuardCase() {
+  const originalFetch = globalThis.fetch;
+
+  try {
+    installWindowStorageStub();
+    writeCachedAISettings({
+      enableAI: false,
+      hasApiKey: true,
+      apiKeyPreview: "sk••••test",
+    });
+    const disabledFetchCalls = [];
+    globalThis.fetch = async (url) => {
+      disabledFetchCalls.push(String(url));
+      throw new Error("settings fetch unavailable in unit test");
+    };
+    const disabledResult = await callDeepSeekJSON({
+      messages: [{ role: "user", content: "请用 json 返回 {}" }],
+      jsonExample: {},
+    });
+    assert.equal(disabledResult.ok, false);
+    assert.equal(disabledResult.error.code, "ai_disabled");
+    assert.equal(
+      disabledFetchCalls.some((url) => url.includes("/api/ai/deepseek/json")),
+      false
+    );
+
+    installWindowStorageStub();
+    writeCachedAISettings({
+      enableAI: true,
+      hasApiKey: false,
+      apiKeyPreview: "",
+    });
+    const missingKeyFetchCalls = [];
+    globalThis.fetch = async (url) => {
+      missingKeyFetchCalls.push(String(url));
+      throw new Error("settings fetch unavailable in unit test");
+    };
+    const missingKeyResult = await callDeepSeekJSON({
+      messages: [{ role: "user", content: "请用 json 返回 {}" }],
+      jsonExample: {},
+    });
+    assert.equal(missingKeyResult.ok, false);
+    assert.equal(missingKeyResult.error.code, "missing_api_key");
+    assert.equal(
+      missingKeyFetchCalls.some((url) => url.includes("/api/ai/deepseek/json")),
+      false
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+async function runSimilarArrangementMergeCase() {
+  const input = {
+    ...createInput("后天去医院复查，还是上次那件事"),
+    existingArrangements: [
+      {
+        id: "arrangement-hospital-1",
+        title: "后天去一趟医院",
+        status: "pending",
+        timeType: "date",
+        fuzzyTimeLabel: "",
+        startTime: "2026-05-19T00:00:00+08:00",
+        endTime: null,
+        dueTime: null,
+        sourceMessageIds: ["old-message-1"],
+      },
+    ],
+  };
+  const result = await analyzeArrangementCandidate(input, {
+    callJSON: async () => ({
+      ok: true,
+      data: {
+        ...arrangementRaw({
+          title: "后天去医院复查",
+          summary: "这与已有去医院安排相似，倾向合并。",
+          type: "schedule",
+          timeType: "date",
+          startTime: "2026-05-19T00:00:00+08:00",
+          items: ["医院复查"],
+        }),
+        action: "merge",
+        confidence: 0.72,
+        reason: "与已有医院安排时间和主题接近。",
+      },
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.hasArrangement, true);
+  assert.equal(result.data.action, "merge");
+  assertCompleteShape(result.data);
+}
+
+async function runSmartCompletionGuardCase() {
+  const result = await analyzeArrangementCandidate(createInput("这个我刚刚已经处理好了"), {
+    callJSON: async () => ({
+      ok: true,
+      data: noArrangementRaw(
+        "这像是完成状态反馈，不应由通用抽取器创建新的安排。",
+        0.18
+      ),
+    }),
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.hasArrangement, false);
+  assert.equal(result.data.action, "ignore");
   assertCompleteShape(result.data);
 }
 
@@ -491,6 +612,229 @@ async function runPrivateCommitmentNegativeCase(name, input, rawResponse) {
   );
 }
 
+async function runPrivateChatSupplementMergeCase() {
+  installWindowStorageStub();
+  const {
+    createArrangementFromAICandidate,
+    mergeArrangementSupplement,
+    undoLastArrangementMerge,
+    getInitialArrangements,
+    hasArrangementForSourceMessage,
+  } = loadTsModule(path.join(rootDir, "src/data/arrangements.ts"));
+
+  const initialCandidate = convertPrivateCommitmentToArrangementCandidate(
+    privateCommitmentRaw({
+      title: "明天到公司帮张三带早餐",
+      summary: "当前用户答应明天到公司时帮张三带早餐。",
+      timeType: "fuzzy",
+      fuzzyTimeLabel: "明天到公司时",
+      location: "公司",
+      executor: "current_user",
+      beneficiary: "other_user",
+      relatedPeople: ["张三"],
+      items: ["早餐"],
+      sourceMessageIds: ["request-1", "reply-1"],
+    })
+  );
+  const initialArrangement = createArrangementFromAICandidate(initialCandidate, {
+    scene: "private_chat",
+    sourceMessageId: "reply-1",
+    sourceMessageIds: ["request-1", "reply-1"],
+    sourceText: "张三：明天来公司帮我带个早餐\n庄骏：好",
+    sourceLabel: "和 张三 的私聊",
+    requestMessageId: "request-1",
+    requestMessageContent: "张三：明天来公司帮我带个早餐",
+    commitmentMessageId: "reply-1",
+    commitmentMessageContent: "庄骏：好",
+    executor: "庄骏",
+    beneficiary: "张三",
+    detectedAt: 1778950000000,
+    confidence: 0.91,
+    candidateId: "private-candidate-merge-1",
+    feedbackStatus: "auto_created",
+  });
+
+  assert.ok(initialArrangement);
+  assert.deepEqual(initialArrangement.items, ["早餐"]);
+
+  const mergeInput = createPrivateMergeInput(initialArrangement, [
+    {
+      id: "request-1",
+      senderId: "other-user",
+      senderName: "张三",
+      content: "明天来公司帮我带个早餐",
+      createdAt: "2026-05-17T09:00:00+08:00",
+    },
+    {
+      id: "reply-1",
+      senderId: "demo",
+      senderName: "庄骏",
+      content: "好",
+      createdAt: "2026-05-17T09:01:00+08:00",
+    },
+    {
+      id: "supplement-1",
+      senderId: "other-user",
+      senderName: "张三",
+      content: "再带杯咖啡",
+      createdAt: "2026-05-17T09:02:00+08:00",
+    },
+    {
+      id: "supplement-2",
+      senderId: "other-user",
+      senderName: "张三",
+      content: "还有那个文件",
+      createdAt: "2026-05-17T09:03:00+08:00",
+    },
+    {
+      id: "reply-2",
+      senderId: "demo",
+      senderName: "庄骏",
+      content: "行",
+      createdAt: "2026-05-17T09:04:00+08:00",
+    },
+  ]);
+  const mergeResult = await analyzePrivateChatSupplementMerge(mergeInput, {
+    callJSON: async () => ({
+      ok: true,
+      data: privateMergeRaw({
+        targetArrangementId: initialArrangement.id,
+        addedItems: ["咖啡", "文件"],
+        newTitle: "明天到公司帮张三带早餐、咖啡和文件",
+        sourceMessageIds: ["supplement-1", "supplement-2", "reply-2"],
+      }),
+    }),
+  });
+
+  assert.equal(mergeResult.ok, true);
+  assert.equal(mergeResult.data.shouldMerge, true);
+  assert.equal(mergeResult.data.mergeType, "add_items");
+
+  const mergedArrangement = mergeArrangementSupplement({
+    targetArrangementId: mergeResult.data.targetArrangementId,
+    mergeType: mergeResult.data.mergeType,
+    sourceMessageId: "reply-2",
+    sourceMessageIds: mergeResult.data.sourceMessageIds,
+    sourceText: "张三：再带杯咖啡\n张三：还有那个文件\n庄骏：行",
+    sourceMessages: [
+      {
+        id: "supplement-1",
+        role: "supplement",
+        senderName: "张三",
+        content: "再带杯咖啡",
+        createdAt: 1778950920000,
+      },
+      {
+        id: "supplement-2",
+        role: "supplement",
+        senderName: "张三",
+        content: "还有那个文件",
+        createdAt: 1778950980000,
+      },
+      {
+        id: "reply-2",
+        role: "commitment",
+        senderName: "庄骏",
+        content: "行",
+        createdAt: 1778951040000,
+      },
+    ],
+    addedItems: mergeResult.data.addedItems,
+    updatedFields: mergeResult.data.updatedFields,
+    newTitle: mergeResult.data.newTitle,
+    detectedAt: 1778951040000,
+    confidence: mergeResult.data.confidence,
+    reason: mergeResult.data.reason,
+  });
+
+  assert.ok(mergedArrangement);
+  assert.equal(mergedArrangement.title, "明天到公司帮张三带早餐、咖啡和文件");
+  assert.deepEqual(mergedArrangement.items, ["早餐", "咖啡", "文件"]);
+  assert.equal(mergedArrangement.relatedContexts.filter((item) => item.role === "supplement").length, 2);
+  assert.equal(mergedArrangement.mergeHistory.length, 1);
+  assert.equal(hasArrangementForSourceMessage("supplement-1"), true);
+
+  const unrelated = await analyzePrivateChatSupplementMerge(
+    createPrivateMergeInput(getInitialArrangements()[0], [
+      {
+        id: "game-1",
+        senderId: "other-user",
+        senderName: "张三",
+        content: "晚上一起打游戏",
+        createdAt: "2026-05-17T09:10:00+08:00",
+      },
+      {
+        id: "game-reply-1",
+        senderId: "demo",
+        senderName: "庄骏",
+        content: "行",
+        createdAt: "2026-05-17T09:11:00+08:00",
+      },
+    ]),
+    {
+      callJSON: async () => ({
+        ok: true,
+        data: {
+          ...privateMergeRaw({
+            targetArrangementId: initialArrangement.id,
+          }),
+          shouldMerge: false,
+          confidence: 0.18,
+          mergeType: "ignore",
+          addedItems: [],
+          sourceMessageIds: [],
+          reason: "这是不同主题，不应合并进早餐安排。",
+        },
+      }),
+    }
+  );
+  assert.equal(unrelated.ok, true);
+  assert.equal(unrelated.data.shouldMerge, false);
+
+  const rejected = await analyzePrivateChatSupplementMerge(
+    createPrivateMergeInput(getInitialArrangements()[0], [
+      {
+        id: "supplement-3",
+        senderId: "other-user",
+        senderName: "张三",
+        content: "再带杯咖啡",
+        createdAt: "2026-05-17T09:12:00+08:00",
+      },
+      {
+        id: "reply-3",
+        senderId: "demo",
+        senderName: "庄骏",
+        content: "不行",
+        createdAt: "2026-05-17T09:13:00+08:00",
+      },
+    ]),
+    {
+      callJSON: async () => ({
+        ok: true,
+        data: {
+          ...privateMergeRaw({
+            targetArrangementId: initialArrangement.id,
+          }),
+          shouldMerge: false,
+          confidence: 0.16,
+          mergeType: "ignore",
+          addedItems: [],
+          sourceMessageIds: [],
+          reason: "当前用户拒绝了补充内容。",
+        },
+      }),
+    }
+  );
+  assert.equal(rejected.ok, true);
+  assert.equal(rejected.data.shouldMerge, false);
+
+  const restoredArrangement = undoLastArrangementMerge(mergedArrangement.id);
+  assert.ok(restoredArrangement);
+  assert.equal(restoredArrangement.title, "明天到公司帮张三带早餐");
+  assert.deepEqual(restoredArrangement.items, ["早餐"]);
+  assert.equal(restoredArrangement.mergeHistory.length, 0);
+}
+
 function createPrivateCommitmentInput(messages) {
   return {
     currentUserId: "demo",
@@ -501,6 +845,20 @@ function createPrivateCommitmentInput(messages) {
     now: "2026-05-17T09:01:00+08:00",
     messages,
     existingArrangements: [],
+  };
+}
+
+function createPrivateMergeInput(candidateArrangement, messages) {
+  return {
+    currentUserId: "demo",
+    currentUserName: "庄骏",
+    otherUserId: "other-user",
+    otherUserName: "张三",
+    currentMessage: messages.at(-1),
+    messages,
+    candidateArrangements: [candidateArrangement],
+    timezone: "Asia/Shanghai",
+    now: "2026-05-17T09:04:00+08:00",
   };
 }
 
@@ -533,6 +891,22 @@ function privateCommitmentRaw(overrides) {
     needsUserConfirmation: false,
     reason: "私聊中形成了承诺。",
     risks: [],
+  };
+}
+
+function privateMergeRaw(overrides) {
+  return {
+    shouldMerge: true,
+    confidence: 0.88,
+    targetArrangementId: "",
+    mergeType: "add_items",
+    addedItems: [],
+    updatedFields: {},
+    newTitle: "",
+    sourceMessageIds: [],
+    reason: "补充内容属于已有安排。",
+    needsUserConfirmation: false,
+    ...overrides,
   };
 }
 
@@ -675,6 +1049,23 @@ function installWindowStorageStub() {
     },
     dispatchEvent: () => true,
   };
+}
+
+function writeCachedAISettings(overrides) {
+  window.localStorage.setItem(
+    "arkme-demo.aiSettings",
+    JSON.stringify({
+      enableAI: false,
+      baseUrl: "https://api.deepseek.com",
+      model: "deepseek-v4-pro",
+      thinkingMode: "disabled",
+      reasoningEffort: "high",
+      maxTokens: 2000,
+      hasApiKey: false,
+      apiKeyPreview: "",
+      ...overrides,
+    })
+  );
 }
 
 function loadTsModule(filePath) {
