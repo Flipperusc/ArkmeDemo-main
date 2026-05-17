@@ -5,9 +5,28 @@ import ChatInput from "@/components/ChatInput";
 import ChatList from "@/components/ChatList";
 import RecordDetailSheet from "@/components/RecordDetailSheet";
 import RecordFullDetailScreen from "@/components/RecordFullDetailScreen";
+import AISettingsScreen from "@/pages/AISettings";
 import Arrangements from "@/pages/Arrangements";
 import Records from "@/pages/Records";
 import { aiConversationLogEntries } from "@/data/aiConversationLog";
+import {
+  arrangementAICandidatesStorageKey,
+  arrangementAIRecordsStorageEvent,
+  getPendingArrangementAICandidates,
+  hasProcessedArrangementAIMessage,
+  hasProcessedSelfChatArrangementMessage,
+  recordArrangementAIFeedback,
+  saveArrangementAICandidate,
+  updateArrangementAICandidateStatus,
+  type ArrangementAICandidateRecord,
+  type ArrangementAICandidateSourceMessage,
+  type ArrangementAIFeedbackAction,
+} from "@/data/arrangementAIRecords";
+import {
+  createArrangementFromAICandidate,
+  getInitialArrangements,
+  hasArrangementForSourceMessage,
+} from "@/data/arrangements";
 import { useCandidateProfile } from "@/data/candidateProfile";
 import {
   createTestReplyMessage,
@@ -33,6 +52,12 @@ import {
 } from "@/data/testConversations";
 import { formatBubbleTime, formatTimeLabel } from "@/lib/time";
 import { cn } from "@/lib/utils";
+import { getAISettings } from "@/services/aiSettings";
+import { analyzeArrangementCandidate } from "@/services/arrangementAIService";
+import {
+  analyzePrivateChatCommitment,
+  convertPrivateCommitmentToArrangementCandidate,
+} from "@/services/privateChatCommitmentAIService";
 import {
   accentColorOptions,
   getLocaleDisplayName,
@@ -45,6 +70,10 @@ import {
   type ThemeMode,
 } from "@/settings/preferences";
 import type { PageType } from "@/App";
+import type {
+  ArrangementCandidateResult,
+  PrivateChatCommitmentResult,
+} from "@/types/arrangementAI";
 import type { RecordItem, RecordReference, RecordSourceConversation } from "@/types/record";
 
 type HomeProps = {
@@ -344,9 +373,9 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   const [sendToSelfTargetUid, setSendToSelfTargetUid] = React.useState<string | null>(null);
   const [activeTestIdentityId, setActiveTestIdentityId] = React.useState<string | null>(null);
   const [testConversationTargetUid, setTestConversationTargetUid] = React.useState<string | null>(null);
-  const [settingsView, setSettingsView] = React.useState<null | "settings" | "appearance" | "about">(
-    null
-  );
+  const [settingsView, setSettingsView] = React.useState<
+    null | "settings" | "appearance" | "about" | "ai"
+  >(null);
   const [searchQuery, setSearchQuery] = React.useState("");
   const [searchHistory, setSearchHistory] = React.useState(getInitialSearchHistory);
   const [recordDetail, setRecordDetail] = React.useState<RecordItem | null>(null);
@@ -358,6 +387,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
   const [createdSelfRecords, setCreatedSelfRecords] = React.useState(
     getInitialCreatedSelfRecords
   );
+  const [pendingArrangementCandidates, setPendingArrangementCandidates] =
+    React.useState(getPendingArrangementAICandidates);
   const [testIdentities, setTestIdentities] = React.useState(getInitialTestIdentities);
   const [testGroups, setTestGroups] = React.useState(getInitialTestGroups);
   const [testMessages, setTestMessages] = React.useState(getInitialTestMessages);
@@ -365,6 +396,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     React.useState<TestReadState>(getInitialTestReadState);
   const initializedBrowserNotificationMessagesRef = React.useRef(false);
   const browserNotifiedMessageIdsRef = React.useRef<Set<string>>(new Set());
+  const candidateProfile = useCandidateProfile();
 
   const unreadAiConversationCount = Math.max(
     0,
@@ -726,6 +758,30 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       (summary) => summary.conversationId === activeTestIdentityId
     ) ?? null;
 
+  const pendingSelfArrangementCandidates = React.useMemo(
+    () =>
+      pendingArrangementCandidates.filter(
+        (candidate) => candidate.scene === "self_chat"
+      ),
+    [pendingArrangementCandidates]
+  );
+  const pendingPrivateArrangementCandidates = React.useMemo(() => {
+    if (!activeTestConversationSummary) return [];
+    const messageIds = new Set(
+      activeTestConversationSummary.records.map((record) =>
+        record.uid.startsWith("test-") ? record.uid.slice(5) : record.uid
+      )
+    );
+
+    return pendingArrangementCandidates.filter((candidate) => {
+      if (candidate.scene !== "private_chat") return false;
+      if (messageIds.has(candidate.sourceMessageId)) return true;
+      return (candidate.sourceMessageIds ?? candidate.result.arrangement.sourceMessageIds).some(
+        (sourceMessageId) => messageIds.has(sourceMessageId)
+      );
+    });
+  }, [activeTestConversationSummary, pendingArrangementCandidates]);
+
   const mineStatisticRecords = React.useMemo(
     () => [
       ...demoRecords,
@@ -759,23 +815,313 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     });
   }, []);
 
-  const createSelfRecord = React.useCallback((content: string) => {
-    const timestamp = Date.now();
-    setCreatedSelfRecords((prev) => {
-      const nextRecords = [
-        ...prev,
-        {
-          uid: `self-${timestamp}`,
-          text_content: content,
-          send_at: timestamp,
-          create_at: timestamp,
-          update_at: timestamp,
-        },
-      ];
-      persistCreatedSelfRecords(nextRecords);
-      return nextRecords;
-    });
+  const refreshPendingArrangementCandidates = React.useCallback(() => {
+    setPendingArrangementCandidates(getPendingArrangementAICandidates());
   }, []);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key !== arrangementAICandidatesStorageKey) return;
+      refreshPendingArrangementCandidates();
+    };
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(
+      arrangementAIRecordsStorageEvent,
+      refreshPendingArrangementCandidates
+    );
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(
+        arrangementAIRecordsStorageEvent,
+        refreshPendingArrangementCandidates
+      );
+    };
+  }, [refreshPendingArrangementCandidates]);
+
+  const triggerSelfArrangementDetection = React.useCallback(
+    async (record: RecordItem) => {
+      try {
+        const content = record.text_content.trim();
+        if (!content) return;
+        if (
+          hasArrangementForSourceMessage(record.uid) ||
+          hasProcessedSelfChatArrangementMessage(record.uid)
+        ) {
+          return;
+        }
+
+        const settings = await getAISettings();
+        if (!settings.enableAI || !settings.hasApiKey) return;
+
+        const detectedAt = Date.now();
+        const result = await analyzeArrangementCandidate({
+          scene: "self_chat",
+          currentUserId: "self",
+          currentUserName: candidateProfile?.name,
+          messages: [
+            {
+              id: record.uid,
+              senderId: "self",
+              senderName: candidateProfile?.name,
+              content,
+              createdAt: new Date(record.send_at).toISOString(),
+            },
+          ],
+          timezone: getRuntimeTimezone(),
+          now: new Date(detectedAt).toISOString(),
+        });
+
+        if (!result.ok) return;
+
+        const candidateResult = result.data;
+        if (!candidateResult.hasArrangement || candidateResult.confidence < 0.5) {
+          saveArrangementAICandidate({
+            scene: "self_chat",
+            sourceMessageId: record.uid,
+            sourceText: content,
+            detectedAt,
+            confidence: candidateResult.confidence,
+            result: candidateResult,
+            status: "ignored",
+          });
+          return;
+        }
+
+        const candidate = saveArrangementAICandidate({
+          scene: "self_chat",
+          sourceMessageId: record.uid,
+          sourceText: content,
+          detectedAt,
+          confidence: candidateResult.confidence,
+          result: candidateResult,
+          status: "pending",
+        });
+
+        if (candidateResult.confidence >= 0.8) {
+          const arrangement = createArrangementFromAICandidate(candidateResult, {
+            scene: "self_chat",
+            sourceMessageId: record.uid,
+            sourceText: content,
+            detectedAt,
+            confidence: candidateResult.confidence,
+            candidateId: candidate.id,
+            feedbackStatus: "auto_created",
+          });
+
+          if (arrangement) {
+            updateArrangementAICandidateStatus(candidate.id, "auto_created", arrangement.id);
+            recordArrangementCandidateFeedback(candidate, "auto_created", arrangement.id);
+          }
+        }
+      } catch {
+        // Self-chat sending must not be interrupted by AI recognition.
+      }
+    },
+    [candidateProfile?.name]
+  );
+
+  const triggerPrivateCommitmentDetection = React.useCallback(
+    async (
+      summary: TestConversationSummary,
+      reply: TestMessage,
+      allMessages: TestMessage[]
+    ) => {
+      try {
+        if (summary.conversationType !== "private") return;
+        const content = reply.text.trim();
+        if (!content) return;
+        if (
+          hasArrangementForSourceMessage(reply.id) ||
+          hasProcessedArrangementAIMessage(reply.id, "private_chat")
+        ) {
+          return;
+        }
+
+        const settings = await getAISettings();
+        if (!settings.enableAI || !settings.hasApiKey) return;
+
+        const contextMessages = allMessages
+          .filter(
+            (message) =>
+              message.conversationId === summary.conversationId &&
+              message.conversationType === "private"
+          )
+          .sort((a, b) => a.sentAt - b.sentAt)
+          .slice(-10);
+        if (contextMessages.length < 2) return;
+
+        const detectedAt = Date.now();
+        const selfName = candidateProfile?.name || "我";
+        const otherUserId = summary.identity?.id || summary.conversationId;
+        const otherUserName = summary.identity?.name || summary.title;
+        const inputMessages = contextMessages.map((message) => ({
+          id: message.id,
+          senderId:
+            message.sender === "demo" ? demoSenderIdentityId : message.identityId,
+          senderName:
+            message.sender === "demo"
+              ? selfName
+              : testIdentities.find((identity) => identity.id === message.identityId)
+                  ?.name || otherUserName,
+          content: message.text,
+          createdAt: new Date(message.sentAt).toISOString(),
+        }));
+
+        const result = await analyzePrivateChatCommitment({
+          currentUserId: demoSenderIdentityId,
+          currentUserName: selfName,
+          otherUserId,
+          otherUserName,
+          messages: inputMessages,
+          existingArrangements: getInitialArrangements().filter(
+            (arrangement) => arrangement.status === "pending"
+          ),
+          timezone: getRuntimeTimezone(),
+          now: new Date(detectedAt).toISOString(),
+        });
+
+        if (!result.ok) return;
+
+        const commitmentResult = result.data;
+        const candidateResult =
+          convertPrivateCommitmentToArrangementCandidate(commitmentResult);
+        const source = buildPrivateCommitmentSource({
+          result: commitmentResult,
+          candidateResult,
+          reply,
+          contextMessages,
+          selfName,
+          otherName: otherUserName,
+        });
+        const shouldTrack =
+          commitmentResult.hasArrangement &&
+          commitmentResult.isRelatedToCurrentUser &&
+          commitmentResult.hasUserCommitted &&
+          commitmentResult.confidence >= 0.5;
+
+        if (!shouldTrack) {
+          saveArrangementAICandidate({
+            scene: "private_chat",
+            sourceMessageId: reply.id,
+            sourceMessageIds: source.sourceMessageIds,
+            sourceText: source.sourceText,
+            sourceLabel: source.sourceLabel,
+            sourceMessages: source.sourceMessages,
+            executorLabel: source.executorLabel,
+            beneficiaryLabel: source.beneficiaryLabel,
+            detectedAt,
+            confidence: commitmentResult.confidence,
+            result: candidateResult,
+            status: "ignored",
+          });
+          return;
+        }
+
+        const candidate = saveArrangementAICandidate({
+          scene: "private_chat",
+          sourceMessageId: reply.id,
+          sourceMessageIds: source.sourceMessageIds,
+          sourceText: source.sourceText,
+          sourceLabel: source.sourceLabel,
+          sourceMessages: source.sourceMessages,
+          executorLabel: source.executorLabel,
+          beneficiaryLabel: source.beneficiaryLabel,
+          detectedAt,
+          confidence: commitmentResult.confidence,
+          result: candidateResult,
+          status: "pending",
+        });
+
+        if (commitmentResult.shouldCreate && commitmentResult.confidence >= 0.8) {
+          const arrangement = createArrangementFromAICandidate(candidateResult, {
+            ...buildArrangementAISourceFromCandidate(candidate),
+            sourceMessageId: candidate.sourceMessageId,
+            sourceText: candidate.sourceText,
+            detectedAt,
+            confidence: commitmentResult.confidence,
+            candidateId: candidate.id,
+            feedbackStatus: "auto_created",
+          });
+
+          if (arrangement) {
+            updateArrangementAICandidateStatus(candidate.id, "auto_created", arrangement.id);
+            recordArrangementCandidateFeedback(candidate, "auto_created", arrangement.id);
+          }
+        }
+      } catch {
+        // Private chat sending must not be interrupted by AI recognition.
+      }
+    },
+    [candidateProfile?.name, testIdentities]
+  );
+
+  const createSelfRecord = React.useCallback(
+    (content: string) => {
+      const timestamp = Date.now();
+      const record: RecordItem = {
+        uid: `self-${timestamp}`,
+        text_content: content,
+        send_at: timestamp,
+        create_at: timestamp,
+        update_at: timestamp,
+      };
+
+      setCreatedSelfRecords((prev) => {
+        const nextRecords = [...prev, record];
+        persistCreatedSelfRecords(nextRecords);
+        return nextRecords;
+      });
+
+      void triggerSelfArrangementDetection(record);
+    },
+    [triggerSelfArrangementDetection]
+  );
+
+  const commitArrangementCandidate = React.useCallback(
+    (
+      candidate: ArrangementAICandidateRecord,
+      action: Extract<ArrangementAIFeedbackAction, "confirmed" | "edited">,
+      draft?: { title: string; note: string }
+    ) => {
+      const arrangement = createArrangementFromAICandidate(candidate.result, {
+        ...buildArrangementAISourceFromCandidate(candidate),
+        sourceMessageId: candidate.sourceMessageId,
+        sourceText: candidate.sourceText,
+        detectedAt: candidate.detectedAt,
+        confidence: candidate.confidence,
+        candidateId: candidate.id,
+        feedbackStatus: action,
+        titleOverride: draft?.title,
+        noteOverride: draft?.note,
+      });
+
+      if (!arrangement) {
+        updateArrangementAICandidateStatus(candidate.id, "ignored");
+        refreshPendingArrangementCandidates();
+        return;
+      }
+
+      updateArrangementAICandidateStatus(candidate.id, action, arrangement.id);
+      recordArrangementCandidateFeedback(candidate, action, arrangement.id);
+      refreshPendingArrangementCandidates();
+    },
+    [refreshPendingArrangementCandidates]
+  );
+
+  const ignoreArrangementCandidate = React.useCallback(
+    (
+      candidate: ArrangementAICandidateRecord,
+      action: Extract<ArrangementAIFeedbackAction, "ignored" | "wrong">
+    ) => {
+      updateArrangementAICandidateStatus(candidate.id, action);
+      recordArrangementCandidateFeedback(candidate, action);
+      refreshPendingArrangementCandidates();
+    },
+    [refreshPendingArrangementCandidates]
+  );
 
   const createRecordExtension = React.useCallback((parentRecord: RecordItem, content: string) => {
     const timestamp = Date.now();
@@ -1025,20 +1371,23 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     );
   }, [homeMessagePreview, openTestConversation]);
 
-  const createTestReply = React.useCallback((summary: TestConversationSummary, content: string) => {
-    const reply = createTestReplyMessage(
-      summary.conversationId,
-      content,
-      summary.conversationType
-    );
-    setTestMessages((prev) => {
-      const nextMessages = [...prev, reply];
+  const createTestReply = React.useCallback(
+    (summary: TestConversationSummary, content: string) => {
+      const reply = createTestReplyMessage(
+        summary.conversationId,
+        content,
+        summary.conversationType
+      );
+      const nextMessages = [...testMessages, reply];
+      setTestMessages(nextMessages);
       persistTestMessages(nextMessages);
-      return nextMessages;
-    });
-    markTestConversationAsRead(summary.conversationId);
-    setTestConversationTargetUid(`test-${reply.id}`);
-  }, [markTestConversationAsRead]);
+      markTestConversationAsRead(summary.conversationId);
+      setTestConversationTargetUid(`test-${reply.id}`);
+
+      void triggerPrivateCommitmentDetection(summary, reply, nextMessages);
+    },
+    [markTestConversationAsRead, testMessages, triggerPrivateCommitmentDetection]
+  );
 
   const openSourceConversation = React.useCallback(
     (source: RecordSourceConversation) => {
@@ -1093,11 +1442,16 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       return <AboutScreen onBack={() => setSettingsView(null)} />;
     }
 
+    if (settingsView === "ai") {
+      return <AISettingsScreen onBack={() => setSettingsView("settings")} />;
+    }
+
     if (settingsView === "settings") {
       return (
         <SettingsScreen
           onBack={() => setSettingsView(null)}
           onOpenAppearance={() => setSettingsView("appearance")}
+          onOpenAI={() => setSettingsView("ai")}
         />
       );
     }
@@ -1118,8 +1472,21 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         <SendToSelfConversationChat
           records={selfRecords}
           targetUid={sendToSelfTargetUid}
+          pendingArrangementCandidates={pendingSelfArrangementCandidates}
           onBack={handleConversationBack}
           onCreateRecord={createSelfRecord}
+          onConfirmArrangementCandidate={(candidate) =>
+            commitArrangementCandidate(candidate, "confirmed")
+          }
+          onEditArrangementCandidate={(candidate, draft) =>
+            commitArrangementCandidate(candidate, "edited", draft)
+          }
+          onIgnoreArrangementCandidate={(candidate) =>
+            ignoreArrangementCandidate(candidate, "ignored")
+          }
+          onMarkArrangementCandidateWrong={(candidate) =>
+            ignoreArrangementCandidate(candidate, "wrong")
+          }
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
         />
@@ -1134,6 +1501,19 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
           onBack={handleConversationBack}
           onOpenRecordDetail={setRecordDetail}
           onOpenRecordSnapshot={setRecordSnapshot}
+          pendingArrangementCandidates={pendingPrivateArrangementCandidates}
+          onConfirmArrangementCandidate={(candidate) =>
+            commitArrangementCandidate(candidate, "confirmed")
+          }
+          onEditArrangementCandidate={(candidate, draft) =>
+            commitArrangementCandidate(candidate, "edited", draft)
+          }
+          onIgnoreArrangementCandidate={(candidate) =>
+            ignoreArrangementCandidate(candidate, "ignored")
+          }
+          onMarkArrangementCandidateWrong={(candidate) =>
+            ignoreArrangementCandidate(candidate, "wrong")
+          }
           onCreateReply={(content) => createTestReply(activeTestConversationSummary, content)}
         />
       );
@@ -2316,15 +2696,28 @@ function AiToolConversationChat({
 function SendToSelfConversationChat({
   records,
   targetUid,
+  pendingArrangementCandidates,
   onBack,
   onCreateRecord,
+  onConfirmArrangementCandidate,
+  onEditArrangementCandidate,
+  onIgnoreArrangementCandidate,
+  onMarkArrangementCandidateWrong,
   onOpenRecordDetail,
   onOpenRecordSnapshot,
 }: {
   records: RecordItem[];
   targetUid?: string | null;
+  pendingArrangementCandidates: ArrangementAICandidateRecord[];
   onBack: () => void;
   onCreateRecord: (content: string) => void;
+  onConfirmArrangementCandidate: (candidate: ArrangementAICandidateRecord) => void;
+  onEditArrangementCandidate: (
+    candidate: ArrangementAICandidateRecord,
+    draft: { title: string; note: string }
+  ) => void;
+  onIgnoreArrangementCandidate: (candidate: ArrangementAICandidateRecord) => void;
+  onMarkArrangementCandidateWrong: (candidate: ArrangementAICandidateRecord) => void;
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
 }) {
@@ -2372,11 +2765,142 @@ function SendToSelfConversationChat({
         onOpenRecordDetail={onOpenRecordDetail}
         onOpenRecordSnapshot={onOpenRecordSnapshot}
       />
+      {pendingArrangementCandidates.length > 0 && (
+        <div className="shrink-0 space-y-2 border-t border-border-light bg-bg px-3 py-2">
+          {pendingArrangementCandidates.slice(0, 2).map((candidate) => (
+            <SelfArrangementCandidateCard
+              key={candidate.id}
+              candidate={candidate}
+              onConfirm={() => onConfirmArrangementCandidate(candidate)}
+              onEdit={(draft) => onEditArrangementCandidate(candidate, draft)}
+              onIgnore={() => onIgnoreArrangementCandidate(candidate)}
+              onMarkWrong={() => onMarkArrangementCandidateWrong(candidate)}
+            />
+          ))}
+        </div>
+      )}
       <ChatInput
         onSubmit={onCreateRecord}
         onVoiceSubmit={() => onCreateRecord(t("records.voiceRecord"))}
       />
     </div>
+  );
+}
+
+function SelfArrangementCandidateCard({
+  candidate,
+  confirmTitle,
+  onConfirm,
+  onEdit,
+  onIgnore,
+  onMarkWrong,
+}: {
+  candidate: ArrangementAICandidateRecord;
+  confirmTitle?: string;
+  onConfirm: () => void;
+  onEdit: (draft: { title: string; note: string }) => void;
+  onIgnore: () => void;
+  onMarkWrong: () => void;
+}) {
+  const { t } = usePreferences();
+  const [editing, setEditing] = React.useState(false);
+  const [title, setTitle] = React.useState(
+    candidate.result.arrangement.title || candidate.sourceText
+  );
+  const [note, setNote] = React.useState(candidate.result.arrangement.summary);
+  const timeLabel = formatSelfArrangementCandidateTime(candidate);
+  const confidenceLabel = `${Math.round(candidate.confidence * 100)}%`;
+
+  if (editing) {
+    return (
+      <section className="rounded-[16px] border border-[var(--record-card-border)] bg-surface px-3 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+        <p className="text-[13px] font-medium leading-5 text-text">
+          {confirmTitle || t("arrangementAI.confirmTitle")}
+        </p>
+        <input
+          className="mt-2 w-full rounded-[12px] border border-[var(--record-card-border)] bg-surface px-3 py-2 text-[14px] leading-5 text-text outline-none focus:border-primary"
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          placeholder={t("arrangementAI.titlePlaceholder")}
+        />
+        <textarea
+          className="mt-2 min-h-[66px] w-full resize-none rounded-[12px] border border-[var(--record-card-border)] bg-surface px-3 py-2 text-[13px] leading-5 text-text outline-none focus:border-primary"
+          value={note}
+          onChange={(event) => setNote(event.target.value)}
+          placeholder={t("arrangementAI.notePlaceholder")}
+        />
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            className="rounded-full bg-primary px-3 py-2 text-[12px] font-medium text-on-primary"
+            onClick={() => {
+              if (!title.trim()) return;
+              onEdit({ title, note });
+            }}
+          >
+            {t("arrangementAI.saveEdited")}
+          </button>
+          <button
+            type="button"
+            className="rounded-full bg-surface-muted px-3 py-2 text-[12px] font-medium text-text-muted"
+            onClick={() => setEditing(false)}
+          >
+            {t("common.back")}
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-[16px] border border-[var(--record-card-border)] bg-surface px-3 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[13px] font-semibold leading-5 text-text">
+            {confirmTitle || t("arrangementAI.confirmTitle")}
+          </p>
+          <p className="mt-1 break-words text-[14px] leading-5 text-text">
+            {candidate.result.arrangement.title || candidate.sourceText}
+          </p>
+          <p className="mt-1 text-[12px] leading-5 text-text-tertiary">
+            {timeLabel || t("arrangements.timeUnset")} · {confidenceLabel}
+          </p>
+        </div>
+      </div>
+      <p className="mt-2 rounded-[12px] bg-surface-muted px-3 py-2 text-[12px] leading-5 text-text-muted">
+        {candidate.sourceText}
+      </p>
+      <div className="mt-3 grid grid-cols-4 gap-1.5">
+        <button
+          type="button"
+          className="rounded-full bg-primary px-2 py-2 text-[12px] font-medium text-on-primary"
+          onClick={onConfirm}
+        >
+          {t("arrangementAI.confirm")}
+        </button>
+        <button
+          type="button"
+          className="rounded-full bg-primary-soft px-2 py-2 text-[12px] font-medium text-primary"
+          onClick={() => setEditing(true)}
+        >
+          {t("arrangementAI.editAndAdd")}
+        </button>
+        <button
+          type="button"
+          className="rounded-full bg-surface-muted px-2 py-2 text-[12px] font-medium text-text-muted"
+          onClick={onIgnore}
+        >
+          {t("arrangementAI.ignore")}
+        </button>
+        <button
+          type="button"
+          className="rounded-full bg-surface-muted px-2 py-2 text-[12px] font-medium text-text-muted"
+          onClick={onMarkWrong}
+        >
+          {t("arrangementAI.wrong")}
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -2386,6 +2910,11 @@ function TestIdentityConversationChat({
   onBack,
   onOpenRecordDetail,
   onOpenRecordSnapshot,
+  pendingArrangementCandidates,
+  onConfirmArrangementCandidate,
+  onEditArrangementCandidate,
+  onIgnoreArrangementCandidate,
+  onMarkArrangementCandidateWrong,
   onCreateReply,
 }: {
   summary: TestConversationSummary;
@@ -2393,6 +2922,14 @@ function TestIdentityConversationChat({
   onBack: () => void;
   onOpenRecordDetail: (record: RecordItem) => void;
   onOpenRecordSnapshot: (record: RecordItem) => void;
+  pendingArrangementCandidates: ArrangementAICandidateRecord[];
+  onConfirmArrangementCandidate: (candidate: ArrangementAICandidateRecord) => void;
+  onEditArrangementCandidate: (
+    candidate: ArrangementAICandidateRecord,
+    draft: { title: string; note: string }
+  ) => void;
+  onIgnoreArrangementCandidate: (candidate: ArrangementAICandidateRecord) => void;
+  onMarkArrangementCandidateWrong: (candidate: ArrangementAICandidateRecord) => void;
   onCreateReply: (content: string) => void;
 }) {
   const { resolvedLocale, t } = usePreferences();
@@ -2525,6 +3062,21 @@ function TestIdentityConversationChat({
           })}
         </div>
       </div>
+      {pendingArrangementCandidates.length > 0 && (
+        <div className="shrink-0 space-y-2 border-t border-border-light bg-bg px-3 py-2">
+          {pendingArrangementCandidates.slice(0, 2).map((candidate) => (
+            <SelfArrangementCandidateCard
+              key={candidate.id}
+              candidate={candidate}
+              confirmTitle={t("arrangementAI.privateConfirmTitle")}
+              onConfirm={() => onConfirmArrangementCandidate(candidate)}
+              onEdit={(draft) => onEditArrangementCandidate(candidate, draft)}
+              onIgnore={() => onIgnoreArrangementCandidate(candidate)}
+              onMarkWrong={() => onMarkArrangementCandidateWrong(candidate)}
+            />
+          ))}
+        </div>
+      )}
       <ChatInput
         onSubmit={onCreateReply}
         onVoiceSubmit={() => onCreateReply(t("records.voiceRecord"))}
@@ -3116,9 +3668,11 @@ function MineActionCard({
 function SettingsScreen({
   onBack,
   onOpenAppearance,
+  onOpenAI,
 }: {
   onBack: () => void;
   onOpenAppearance: () => void;
+  onOpenAI: () => void;
 }) {
   const { localeCode, resolvedLocale, t } = usePreferences();
   const [showLanguageSheet, setShowLanguageSheet] = React.useState(false);
@@ -3133,6 +3687,11 @@ function SettingsScreen({
             title={t("settings.appearance")}
             description={t("settings.appearanceDesc")}
             onClick={onOpenAppearance}
+          />
+          <SettingsListItem
+            title={t("settings.ai")}
+            description={t("settings.aiDesc")}
+            onClick={onOpenAI}
           />
           <SettingsListItem
             title={t("settings.language")}
@@ -3502,6 +4061,157 @@ function SendToSelfIcon({ className }: { className?: string }) {
   return (
     <img src={src} alt="" className={className} aria-hidden="true" />
   );
+}
+
+function formatSelfArrangementCandidateTime(candidate: ArrangementAICandidateRecord) {
+  const arrangement = candidate.result.arrangement;
+  if (arrangement.timeType === "fuzzy") return arrangement.fuzzyTimeLabel;
+  if (arrangement.timeType === "date" && arrangement.startTime) return arrangement.startTime;
+  if (arrangement.timeType === "datetime" && arrangement.startTime) {
+    return arrangement.startTime;
+  }
+  if (arrangement.timeType === "range" && arrangement.startTime) {
+    return arrangement.endTime
+      ? `${arrangement.startTime} - ${arrangement.endTime}`
+      : arrangement.startTime;
+  }
+  if (arrangement.timeType === "due" && arrangement.dueTime) return arrangement.dueTime;
+  return "";
+}
+
+function buildPrivateCommitmentSource({
+  result,
+  candidateResult,
+  reply,
+  contextMessages,
+  selfName,
+  otherName,
+}: {
+  result: PrivateChatCommitmentResult;
+  candidateResult: ArrangementCandidateResult;
+  reply: TestMessage;
+  contextMessages: TestMessage[];
+  selfName: string;
+  otherName: string;
+}) {
+  const modelSourceIds = new Set([
+    ...result.arrangement.sourceMessageIds,
+    ...candidateResult.arrangement.sourceMessageIds,
+  ]);
+  const commitmentMessage =
+    contextMessages.find((message) => message.id === reply.id) ?? reply;
+  const requestMessage =
+    [...contextMessages]
+      .reverse()
+      .find(
+        (message) =>
+          message.sender === "identity" &&
+          (modelSourceIds.has(message.id) || message.sentAt <= reply.sentAt)
+      ) ?? null;
+  const sourceMessages = [
+    requestMessage
+      ? buildCandidateSourceMessage(requestMessage, "request", otherName)
+      : null,
+    buildCandidateSourceMessage(commitmentMessage, "commitment", selfName),
+  ].filter(
+    (message): message is ArrangementAICandidateSourceMessage => Boolean(message)
+  );
+  const sourceMessageIds = uniqueTextValues([
+    ...Array.from(modelSourceIds),
+    ...sourceMessages.map((message) => message.id),
+    reply.id,
+  ]);
+
+  return {
+    sourceMessageIds,
+    sourceText:
+      sourceMessages.map(formatCandidateSourceMessage).join("\n") || reply.text,
+    sourceLabel: `和 ${otherName} 的私聊`,
+    sourceMessages,
+    executorLabel: formatPrivateParticipant(result.arrangement.executor, selfName, otherName),
+    beneficiaryLabel: formatPrivateParticipant(
+      result.arrangement.beneficiary,
+      selfName,
+      otherName
+    ),
+  };
+}
+
+function buildArrangementAISourceFromCandidate(candidate: ArrangementAICandidateRecord) {
+  const requestMessage = candidate.sourceMessages?.find(
+    (message) => message.role === "request"
+  );
+  const commitmentMessage = candidate.sourceMessages?.find(
+    (message) => message.role === "commitment"
+  );
+
+  return {
+    scene: candidate.scene,
+    sourceLabel: candidate.sourceLabel,
+    sourceMessageIds:
+      candidate.sourceMessageIds ?? candidate.result.arrangement.sourceMessageIds,
+    requestMessageId: requestMessage?.id,
+    requestMessageContent: requestMessage
+      ? formatCandidateSourceMessage(requestMessage)
+      : undefined,
+    commitmentMessageId: commitmentMessage?.id,
+    commitmentMessageContent: commitmentMessage
+      ? formatCandidateSourceMessage(commitmentMessage)
+      : undefined,
+    executor: candidate.executorLabel,
+    beneficiary: candidate.beneficiaryLabel,
+  };
+}
+
+function buildCandidateSourceMessage(
+  message: TestMessage,
+  role: ArrangementAICandidateSourceMessage["role"],
+  senderName: string
+): ArrangementAICandidateSourceMessage {
+  return {
+    id: message.id,
+    role,
+    senderName,
+    content: message.text,
+    createdAt: message.sentAt,
+  };
+}
+
+function formatCandidateSourceMessage(message: ArrangementAICandidateSourceMessage) {
+  return message.senderName ? `${message.senderName}：${message.content}` : message.content;
+}
+
+function formatPrivateParticipant(value: string, selfName: string, otherName: string) {
+  if (value === "current_user") return selfName || "我";
+  if (value === "other_user") return otherName;
+  return value;
+}
+
+function uniqueTextValues(values: string[]) {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
+function recordArrangementCandidateFeedback(
+  candidate: ArrangementAICandidateRecord,
+  action: ArrangementAIFeedbackAction,
+  arrangementId?: string
+) {
+  recordArrangementAIFeedback({
+    action,
+    scene: candidate.scene,
+    sourceMessageId: candidate.sourceMessageId,
+    sourceText: candidate.sourceText,
+    candidateId: candidate.id,
+    ...(arrangementId ? { arrangementId } : {}),
+  });
+}
+
+function getRuntimeTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
+  } catch {
+    return "Asia/Shanghai";
+  }
 }
 
 function OverviewEntryTag({ label }: { label: string }) {

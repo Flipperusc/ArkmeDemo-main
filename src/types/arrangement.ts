@@ -11,6 +11,7 @@ export type ArrangementTimeType =
 export type ArrangementSourceType =
   | "manual"
   | "self"
+  | "self_chat"
   | "private_chat"
   | "group_chat"
   | "ai_detected";
@@ -30,6 +31,28 @@ export type ArrangementReminder = {
   createdFrom: "manual" | "time" | "ai";
 };
 
+export type ArrangementSourceContext = {
+  sourceType: "self_chat" | "manual" | "private_chat" | "group_chat";
+  sourceLabel: string;
+  messageId: string;
+  messageContent: string;
+  requestMessageId?: string;
+  requestMessageContent?: string;
+  commitmentMessageId?: string;
+  commitmentMessageContent?: string;
+  executor?: string;
+  beneficiary?: string;
+  detectedAt: number | null;
+  confidence: number | null;
+  candidateId?: string;
+};
+
+export type ArrangementAIFeedback = {
+  status: "auto_created" | "confirmed" | "edited" | "ignored" | "wrong";
+  updatedAt: number;
+  note?: string;
+};
+
 export type ArrangementItem = {
   id: string;
   title: string;
@@ -42,8 +65,10 @@ export type ArrangementItem = {
   fuzzyTimeLabel: string;
   sourceType: ArrangementSourceType;
   sourceMessageIds: string[];
+  sourceContext?: ArrangementSourceContext;
   relatedPeople: ArrangementRelatedPerson[];
   reminder: ArrangementReminder;
+  aiFeedback?: ArrangementAIFeedback;
   createdAt: number;
   updatedAt: number;
 };

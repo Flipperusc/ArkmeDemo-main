@@ -331,6 +331,162 @@ P0 只写入 `manual` 来源；其它 sourceType 先为后续 AI/聊天识别预
 - 本地移动端 Demo `http://127.0.0.1:5173/` 返回 200
 - 未执行云端真实上传：当前环境未提供面试上传环境变量
 
+## 2026-05-17 14:43:25 CST (+0800)
+
+### 用户输入
+请继续开发「安排」模块 AI 能力。当前已有 P1.5、DeepSeek API 设置、DeepSeek 服务层和 JSON 调用封装。本批实现通用「安排 AI 结构化识别引擎」，提供 `analyzeArrangementCandidate(input)`，输入支持 self_chat/private_chat/group_chat/manual_text、当前用户、消息、已有安排、时区和当前时间；输出完整 JSON 字段。要求 prompt 明确只输出 json、说明安排不是普通任务、不要过度创建、低置信度需要确认、不要把玩笑寒暄误判为安排；实现 prompt 构建、TypeScript 类型校验或 schema、normalize、失败 fallback、最小测试用例；不接入具体页面，不修改安排列表交互。
+
+### AI 最终输出
+已完成通用「安排 AI 结构化识别引擎」。
+
+Prompt 文件在 `src/services/arrangementAIPrompt.ts`：包含 system prompt、JSON 示例和输入摘要构建，明确模型是安排识别器、只输出 json、不输出 markdown/解释文字，并约束低置信度确认、不过度创建安排、不把玩笑寒暄和无意义符号误判为安排。
+
+通用识别方法在 `src/services/arrangementAIService.ts`：新增 `analyzeArrangementCandidate(input)`，默认通过 `callDeepSeekJSON()` 调用 DeepSeek JSON 封装，固定 `thinkingMode: "disabled"` 和 `maxTokens: 2000`。保留 `analyzeArrangementFromText()` 作为兼容入口。
+
+JSON 结果校验与 normalize：新增 `src/types/arrangementAI.ts` 定义输入、输出、action、timeType、arrangement type 等类型；`normalizeArrangementCandidateResult()` 对枚举、置信度、ISO 时间、数组字段、sourceMessageIds 和完整字段做运行时归一化，缺失字段补空字符串、null 或空数组，低置信度自动标记 `needs_confirmation`。
+
+失败 fallback 策略：DeepSeek 调用失败、空 content、JSON parse 失败、网络错误等由 `callDeepSeekJSON()` 转成错误；`analyzeArrangementCandidate()` 返回完整 fallback JSON，`hasArrangement=false`、`action=ignore`，并把错误 code 放入 `risks`，避免把失败误当成安排。
+
+验证方式：新增 `scripts/test-arrangement-ai.mjs` 和 `pnpm test:arrangement-ai`，覆盖「后天去一趟医院」「哈哈哈哈」「周末找时间整理房间」「明天上午 10 点开会」「有空再说吧」「～～」以及 `empty_content`、`json_parse_error` fallback。`pnpm verify:answer` 已接入该测试并通过。移动端 Demo：`http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- package.json
+- scripts/test-arrangement-ai.mjs
+- src/types/arrangementAI.ts
+- src/services/arrangementAIPrompt.ts
+- src/services/arrangementAIService.ts
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 attention.md
+- `pnpm lint` 通过
+- `pnpm build` 通过
+- `pnpm test:arrangement-ai` 通过
+- `pnpm verify:answer` 通过
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-17 15:01:14 CST (+0800)
+
+### 用户输入
+请继续开发「安排」模块 AI 能力：自聊 / 发给自己的内容识别安排。当前已有 DeepSeek API 设置、服务层、通用安排 AI 结构化识别引擎和安排基础能力。本批目标是在自聊或发给自己的输入中发送未来事项后，使用 `deepseek-v4-pro` 识别并生成安排；消息发送不能被阻塞，AI 失败不能影响聊天，用户关闭 AI 时不调用 DeepSeek；根据置信度自动创建、显示待确认卡片或忽略；安排详情展示来源原文、识别时间、AI 置信度，并支持修改、忽略、标记识别错误，反馈进入本地记录。
+
+### AI 最终输出
+已完成自聊 / 发给自己的内容识别安排接入。
+
+自聊触发点在 `src/pages/Home.tsx`：`createSelfRecord()` 先把消息写入自聊记录，然后异步调用 `triggerSelfArrangementDetection()`。触发前会读取 AI 设置，只有 `enableAI=true` 且已有 API Key 时才调用 `analyzeArrangementCandidate()`；整个识别流程包在 `try/catch` 里，DeepSeek 网络失败、解析失败或未配置都不会阻塞或打断聊天。
+
+创建策略：`confidence >= 0.8` 且 `hasArrangement=true` 时通过 `createArrangementFromAICandidate()` 自动创建安排，`sourceType` 为 `self_chat`，`sourceMessageIds` 包含原消息 id；`0.5 <= confidence < 0.8` 时写入本地待确认候选，并在自聊底部显示「我好像识别到一个安排，要加入吗？」确认卡；`confidence < 0.5` 默认忽略，不打扰用户。
+
+重复创建规避：发送后先检查 `hasArrangementForSourceMessage(messageId)` 和 `hasProcessedSelfChatArrangementMessage(messageId)`；已创建安排或已处理过候选的消息不会再次创建。
+
+待确认安排：新增 `src/data/arrangementAIRecords.ts` 保存候选和反馈记录。确认卡支持「加入」「修改后加入」「忽略」「识别错了」；确认、编辑、忽略、标错都会写入本地反馈记录，供后续优化 prompt 使用。
+
+安排详情来源展示：`src/pages/Arrangements.tsx` 会在 AI 创建的安排详情展示「发给自己的消息」、原文内容、识别时间、AI 置信度，并提供「标记识别错了」。详情页编辑 AI 来源安排会记录 `edited` 反馈；忽略或标错会更新安排状态并记录反馈。
+
+验证方式：`pnpm lint`、`pnpm build`、`pnpm test:arrangement-ai`、`pnpm verify:answer` 均通过。移动端 Demo：`http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- src/types/arrangement.ts
+- src/data/arrangementAIRecords.ts
+- src/data/arrangements.ts
+- src/pages/Home.tsx
+- src/pages/Arrangements.tsx
+- src/settings/preferences.ts
+- scripts/test-arrangement-ai.mjs
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 attention.md
+- `pnpm lint` 通过
+- `pnpm build` 通过
+- `pnpm test:arrangement-ai` 通过
+- `pnpm verify:answer` 通过
+- 本地移动端 Demo `http://127.0.0.1:5173/` 可访问
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-17 15:16:07 CST (+0800)
+
+### 用户输入
+添加功能：开启 AI 识别后，可以对之前没有识别的安排重新识别，用户可以自己选择需要重新识别的内容，选择方式包括按时间、按最近 xxx 条、按对话选择（私聊/群聊/等等）。同时修复 bug：开启 AI 识别的按钮 UI 显示不正常。
+
+### AI 最终输出
+已完成历史内容重新识别入口，并修复 AI 开关 UI。
+
+重新识别入口在 `src/pages/AISettings.tsx` 的「历史内容重新识别」区：支持按时间选择（全部、今天、近 7 天、近 30 天）、按最近条数选择（10/30/50/100 条）、按对话类型选择（全部、发给自己、私聊、群聊）以及按具体对话选择。
+
+历史识别逻辑在 `src/services/arrangementAIBackfillService.ts`：会收集自聊本地记录、测试私聊和测试群聊消息；只在 AI 已开启且已有 API Key 时执行；已创建安排或已处理过候选的消息会跳过。识别结果复用 `analyzeArrangementCandidate()`：高置信度自动创建安排，中置信度进入待确认候选，低置信度忽略。
+
+为了支持私聊/群聊来源，本轮把 `src/data/arrangementAIRecords.ts` 和 `src/data/arrangements.ts` 从 self_chat 扩展到通用 scene，AI 创建安排会保存来源标签、原文、识别时间和置信度。安排详情页也改为支持显示私聊/群聊等 AI 来源。
+
+AI 开关 UI 已修复：开关滑块改为固定 `left-1` 定位，开启状态使用 `translate-x-5`，避免原来滑块位置异常。
+
+验证方式：`pnpm verify:answer` 通过；其中包含 `pnpm lint`、`pnpm build`、`pnpm test:arrangement-ai`、日志校验和答题规范校验。移动端 Demo：`http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- src/pages/AISettings.tsx
+- src/services/arrangementAIBackfillService.ts
+- src/data/arrangementAIRecords.ts
+- src/data/arrangements.ts
+- src/pages/Arrangements.tsx
+- scripts/test-arrangement-ai.mjs
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 attention.md
+- `pnpm lint` 通过
+- `pnpm build` 通过
+- `pnpm test:arrangement-ai` 通过
+- `pnpm verify:answer` 通过
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-17 01:18:42 CST (+0800)
+
+### 用户输入
+请继续开发「安排」模块，当前 P1.5 已经完成，进入 AI 能力阶段。实现 DeepSeek API 配置与统一 AI 服务层，默认模型 `deepseek-v4-pro`、默认 Base URL `https://api.deepseek.com`、OpenAI 兼容格式；新增 AI 设置页或设置模块，支持保存、清除、测试连接、隐藏/显示 API Key；不要在前端页面直接调用 DeepSeek，不要暴露 API Key；新增 `getAISettings()`、`saveAISettings()`、`clearAISettings()`、`testDeepSeekConnection()`、`callDeepSeekJSON()`、`analyzeArrangementFromText()`；JSON 调用必须集中封装并处理未配置、网络失败、限流、空内容、解析失败等错误；本批不做自聊、私聊、群聊识别、合并或智能完成。
+
+### AI 最终输出
+已完成 DeepSeek AI 配置与统一服务层接入。
+
+新增文件：`src/types/ai.ts`、`src/services/aiSettings.ts`、`src/services/deepseekClient.ts`、`src/services/arrangementAIService.ts`、`src/pages/AISettings.tsx`。同时修改 `src/pages/Home.tsx`、`src/settings/preferences.ts` 和 `vite.config.ts`。
+
+DeepSeek 配置存储：前端只在 `localStorage` 保存非密钥配置和脱敏状态；API Key 只提交到同源代理的运行时内存，不写入浏览器存储，也不会进入 console、错误文案或业务数据。生产环境需要替换为真实服务端代理和服务端密钥存储。
+
+服务端代理：本地 Demo 通过 Vite dev/preview 中间件暴露 `/api/ai/deepseek/settings`、`/api/ai/deepseek/test`、`/api/ai/deepseek/json`，页面组件只调用 `src/services/*`，不直接拼接 DeepSeek 请求。
+
+JSON 调用封装：`src/services/deepseekClient.ts` 的 `callDeepSeekJSON()` 统一进入代理；代理侧使用 `model: deepseek-v4-pro`、`response_format: { type: "json_object" }`、JSON system guard 和 JSON 示例，并处理未配置 Key、Key 错误、网络失败、限流、空内容、解析失败和非预期结构。`reasoning_content` 不会返回给前端。
+
+验证方式：已运行 `pnpm lint` 和 `pnpm build` 通过；已重启本地 dev server 并验证 `http://127.0.0.1:5173/api/ai/deepseek/settings` 返回默认脱敏配置；使用测试 Key 验证保存接口只返回脱敏预览、连接测试返回温和错误后已清除配置；随后运行 `pnpm verify:answer` 通过。移动端 Demo：`http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- src/types/ai.ts
+- src/services/aiSettings.ts
+- src/services/deepseekClient.ts
+- src/services/arrangementAIService.ts
+- src/pages/AISettings.tsx
+- src/pages/Home.tsx
+- src/settings/preferences.ts
+- vite.config.ts
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 attention.md
+- 参考 DeepSeek 官方 JSON Output 和 pricing/quick start 文档
+- `pnpm lint` 通过
+- `pnpm build` 通过
+- 本地 dev server 已重启到 `http://127.0.0.1:5173/`
+- `GET http://127.0.0.1:5173/api/ai/deepseek/settings` 返回默认脱敏配置
+- 使用测试 Key 调用保存接口只返回脱敏预览；测试连接返回 `invalid_api_key` 的温和错误；随后已清除配置
+- `pnpm verify:answer` 通过
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
 ## 2026-05-16 21:42:10 CST (+0800)
 
 ### 用户输入
@@ -458,4 +614,70 @@ Tag URL：`https://github.com/Flipperusc/ArkmeDemo-main/releases/tag/v0.1.0`
 - `pnpm build` 通过
 - `pnpm verify:answer` 通过
 - 本地移动端 Demo `http://127.0.0.1:5173/` 返回 200
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-17 15:38:24 CST (+0800)
+
+### 用户输入
+请继续开发「安排」模块 AI 能力：私聊承诺识别。要求在私聊消息产生后检查最近上下文，识别「对方请求 - 当前用户承诺」结构；只有事项与当前用户有关、当前用户是执行人且已明确答应时才创建安排。高置信度自动创建，中置信度进入待确认，低置信度不创建；详情页展示私聊来源、对方请求、我的答应、执行人和受益人；失败不影响聊天，不做群聊、双方同步、复杂合并或智能完成。
+
+### AI 最终输出
+已完成「安排」AI 私聊承诺识别。
+
+私聊上下文截取在 `src/pages/Home.tsx` 的 `triggerPrivateCommitmentDetection()`：用户在测试私聊里回复后，先保存消息，再异步取当前私聊最近 10 条消息传给 AI；群聊不会触发。AI 关闭、没有 API Key、网络失败或 JSON 失败时都会静默结束，不影响消息发送。
+
+承诺判断通过新的 `src/services/privateChatCommitmentPrompt.ts` 和 `src/services/privateChatCommitmentAIService.ts`：prompt 明确只识别「对方请求 - 当前用户承诺」，要求判断 `isRelatedToCurrentUser`、`hasUserCommitted`、执行人和受益人，并规避对方只是提出请求、当前用户拒绝、玩笑寒暄、对方自己要做的事等误创建场景。
+
+创建策略：只有 `hasArrangement=true`、`isRelatedToCurrentUser=true`、`hasUserCommitted=true`、`shouldCreate=true` 且 `confidence >= 0.8` 才自动创建；`0.5 <= confidence < 0.8` 会进入待确认卡片，文案为「你刚刚好像答应了这件事，要加入安排吗？」；低置信度只记录为忽略，不打扰用户。重复创建通过源消息 id 和候选记录检查规避。
+
+详情页来源已扩展：私聊 AI 创建的安排会保存「和 xxx 的私聊」、对方请求消息、我的答应消息、执行人、受益人、识别时间和置信度，并保留修改、忽略、标记识别错误的反馈链路。
+
+验证方式：`pnpm lint`、`pnpm build`、`pnpm test:arrangement-ai` 均通过；`pnpm verify:answer` 通过。移动端 Demo：`http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- src/types/arrangementAI.ts
+- src/types/arrangement.ts
+- src/services/privateChatCommitmentPrompt.ts
+- src/services/privateChatCommitmentAIService.ts
+- src/data/arrangementAIRecords.ts
+- src/data/arrangements.ts
+- src/pages/Home.tsx
+- src/pages/Arrangements.tsx
+- src/settings/preferences.ts
+- scripts/test-arrangement-ai.mjs
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `AGENTS.md`、`docs/candidate-rules.md` 和 `attention.md`
+- `pnpm lint` 通过
+- `pnpm build` 通过
+- `pnpm test:arrangement-ai` 通过
+- `pnpm verify:answer` 通过
+- 本地 5173 端口已有服务占用，可通过移动端 Demo `http://127.0.0.1:5173/` 验证
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-17 20:24:57 CST (+0800)
+
+### 用户输入
+推送 arkmeDemo-main，版本 0.2.0：私聊模块开发完毕。
+
+### AI 最终输出
+已将 ArkmeDemo-main 当前本地改动提交并推送到 GitHub，并创建/推送 `v0.2.0` annotated tag，版本说明为「版本0.2.0：私聊模块开发完毕」。
+
+本次推送前已确认上一轮私聊承诺识别记录存在于当前候选人个人 Markdown 日志和 `src/data/aiConversationLog.ts`，并按仓库规范补充了本轮推送记录。推送前运行完整校验，包含 lint、生产构建、安排 AI 测试、Codex 日志校验和答题规范校验。
+
+测试入口：移动端 Demo `http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `github-push-local` 和 `github-tag-version` 技能说明
+- `pnpm verify:answer` 通过
+- 已提交并推送 `main`
+- 已创建并推送 `v0.2.0` annotated tag
 - 未执行云端真实上传：当前环境未提供面试上传环境变量

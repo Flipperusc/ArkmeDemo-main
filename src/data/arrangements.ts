@@ -1,11 +1,15 @@
 import type {
+  ArrangementAIFeedback,
   ArrangementItem,
   ArrangementReminder,
   ArrangementRelatedPerson,
+  ArrangementSourceContext,
   ArrangementSourceType,
   ArrangementStatus,
   ArrangementTimeType,
 } from "@/types/arrangement";
+import type { ArrangementCandidateResult } from "@/types/arrangementAI";
+import type { ArrangementAIScene } from "@/types/arrangementAI";
 
 export const arrangementsStorageKey = "arkme-demo.arrangements";
 export const arrangementsStorageEvent = "arkme-demo:arrangements-updated";
@@ -22,6 +26,26 @@ export type ArrangementDraft = {
   dueValue: string;
   reminderEnabled: boolean;
   reminderOffsetMinutes: number;
+};
+
+export type ArrangementAICreateSource = {
+  scene?: ArrangementAIScene;
+  sourceLabel?: string;
+  sourceMessageId: string;
+  sourceMessageIds?: string[];
+  sourceText: string;
+  requestMessageId?: string;
+  requestMessageContent?: string;
+  commitmentMessageId?: string;
+  commitmentMessageContent?: string;
+  executor?: string;
+  beneficiary?: string;
+  detectedAt: number;
+  confidence: number;
+  candidateId?: string;
+  feedbackStatus?: ArrangementAIFeedback["status"];
+  titleOverride?: string;
+  noteOverride?: string;
 };
 
 const now = Date.now();
@@ -166,6 +190,7 @@ function normalizeSourceType(value: unknown): ArrangementSourceType {
   if (
     value === "manual" ||
     value === "self" ||
+    value === "self_chat" ||
     value === "private_chat" ||
     value === "group_chat" ||
     value === "ai_detected"
@@ -174,6 +199,79 @@ function normalizeSourceType(value: unknown): ArrangementSourceType {
   }
 
   return "manual";
+}
+
+function normalizeSourceContext(value: unknown): ArrangementSourceContext | undefined {
+  if (!value || typeof value !== "object") return undefined;
+
+  const sourceContext = value as Partial<ArrangementSourceContext>;
+  const sourceType =
+    sourceContext.sourceType === "self_chat" ||
+    sourceContext.sourceType === "manual" ||
+    sourceContext.sourceType === "private_chat" ||
+    sourceContext.sourceType === "group_chat"
+      ? sourceContext.sourceType
+      : "manual";
+  const messageId = normalizeText(sourceContext.messageId);
+  const messageContent = normalizeText(sourceContext.messageContent);
+
+  if (!messageId && !messageContent) return undefined;
+
+  return {
+    sourceType,
+    sourceLabel: normalizeText(sourceContext.sourceLabel),
+    messageId,
+    messageContent,
+    ...(normalizeText(sourceContext.requestMessageId)
+      ? { requestMessageId: normalizeText(sourceContext.requestMessageId) }
+      : {}),
+    ...(normalizeText(sourceContext.requestMessageContent)
+      ? { requestMessageContent: normalizeText(sourceContext.requestMessageContent) }
+      : {}),
+    ...(normalizeText(sourceContext.commitmentMessageId)
+      ? { commitmentMessageId: normalizeText(sourceContext.commitmentMessageId) }
+      : {}),
+    ...(normalizeText(sourceContext.commitmentMessageContent)
+      ? { commitmentMessageContent: normalizeText(sourceContext.commitmentMessageContent) }
+      : {}),
+    ...(normalizeText(sourceContext.executor)
+      ? { executor: normalizeText(sourceContext.executor) }
+      : {}),
+    ...(normalizeText(sourceContext.beneficiary)
+      ? { beneficiary: normalizeText(sourceContext.beneficiary) }
+      : {}),
+    detectedAt: normalizeTimestamp(sourceContext.detectedAt),
+    confidence:
+      typeof sourceContext.confidence === "number" &&
+      Number.isFinite(sourceContext.confidence)
+        ? Math.min(Math.max(sourceContext.confidence, 0), 1)
+        : null,
+    ...(normalizeText(sourceContext.candidateId)
+      ? { candidateId: normalizeText(sourceContext.candidateId) }
+      : {}),
+  };
+}
+
+function normalizeAIFeedback(value: unknown): ArrangementAIFeedback | undefined {
+  if (!value || typeof value !== "object") return undefined;
+
+  const feedback = value as Partial<ArrangementAIFeedback>;
+  const status =
+    feedback.status === "auto_created" ||
+    feedback.status === "confirmed" ||
+    feedback.status === "edited" ||
+    feedback.status === "ignored" ||
+    feedback.status === "wrong"
+      ? feedback.status
+      : null;
+
+  if (!status) return undefined;
+
+  return {
+    status,
+    updatedAt: normalizeTimestamp(feedback.updatedAt) ?? Date.now(),
+    ...(normalizeText(feedback.note) ? { note: normalizeText(feedback.note) } : {}),
+  };
 }
 
 function normalizeReminder(value: unknown): ArrangementReminder {
@@ -254,8 +352,14 @@ function normalizeArrangement(value: unknown, index: number): ArrangementItem | 
     fuzzyTimeLabel: normalizeText(arrangement.fuzzyTimeLabel),
     sourceType: normalizeSourceType(arrangement.sourceType),
     sourceMessageIds,
+    ...(normalizeSourceContext(arrangement.sourceContext)
+      ? { sourceContext: normalizeSourceContext(arrangement.sourceContext) }
+      : {}),
     relatedPeople,
     reminder: normalizeReminder(arrangement.reminder),
+    ...(normalizeAIFeedback(arrangement.aiFeedback)
+      ? { aiFeedback: normalizeAIFeedback(arrangement.aiFeedback) }
+      : {}),
     createdAt: normalizeTimestamp(arrangement.createdAt) ?? timestamp,
     updatedAt: normalizeTimestamp(arrangement.updatedAt) ?? timestamp,
   };
@@ -293,6 +397,86 @@ export function createArrangement(draft: ArrangementDraft): ArrangementItem | nu
     sourceMessageIds: [],
     relatedPeople: [],
     reminder,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
+
+  persistArrangements([arrangement, ...getInitialArrangements()]);
+  return arrangement;
+}
+
+export function createArrangementFromAICandidate(
+  result: ArrangementCandidateResult,
+  source: ArrangementAICreateSource
+): ArrangementItem | null {
+  if (!result.hasArrangement) return null;
+
+  const title =
+    normalizeText(source.titleOverride) ||
+    normalizeText(result.arrangement.title) ||
+    normalizeText(result.arrangement.summary);
+  if (!title) return null;
+
+  const sourceMessageIds = uniqueTextValues([
+    source.sourceMessageId,
+    ...(source.sourceMessageIds ?? []),
+  ]);
+
+  if (sourceMessageIds.some((sourceMessageId) => hasArrangementForSourceMessage(sourceMessageId))) {
+    return null;
+  }
+
+  const timestamp = Date.now();
+  const sourceScene = normalizeAISourceScene(source.scene);
+  const timeFields = buildArrangementTimeFieldsFromAI(result);
+  const reminder = buildArrangementReminderFromAI(result, timeFields);
+  const arrangement: ArrangementItem = {
+    id: `arrangement-ai-${timestamp}`,
+    title,
+    note:
+      normalizeText(source.noteOverride) ||
+      normalizeText(result.arrangement.summary) ||
+      normalizeText(result.reason),
+    status: "pending",
+    ...timeFields,
+    sourceType: sourceScene,
+    sourceMessageIds,
+    sourceContext: {
+      sourceType: sourceScene,
+      sourceLabel: normalizeText(source.sourceLabel) || getDefaultAISourceLabel(sourceScene),
+      messageId: source.sourceMessageId,
+      messageContent: source.sourceText,
+      ...(normalizeText(source.requestMessageId)
+        ? { requestMessageId: normalizeText(source.requestMessageId) }
+        : {}),
+      ...(normalizeText(source.requestMessageContent)
+        ? { requestMessageContent: normalizeText(source.requestMessageContent) }
+        : {}),
+      ...(normalizeText(source.commitmentMessageId)
+        ? { commitmentMessageId: normalizeText(source.commitmentMessageId) }
+        : {}),
+      ...(normalizeText(source.commitmentMessageContent)
+        ? { commitmentMessageContent: normalizeText(source.commitmentMessageContent) }
+        : {}),
+      ...(normalizeText(source.executor) ? { executor: normalizeText(source.executor) } : {}),
+      ...(normalizeText(source.beneficiary)
+        ? { beneficiary: normalizeText(source.beneficiary) }
+        : {}),
+      detectedAt: source.detectedAt,
+      confidence: source.confidence,
+      ...(source.candidateId ? { candidateId: source.candidateId } : {}),
+    },
+    relatedPeople: result.arrangement.relatedPeople.map((name, index) => ({
+      id: `ai-person-${timestamp}-${index}`,
+      name,
+      role: "mentioned",
+      avatarLabel: name.slice(0, 2),
+    })),
+    reminder,
+    aiFeedback: {
+      status: source.feedbackStatus ?? "auto_created",
+      updatedAt: timestamp,
+    },
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -360,7 +544,17 @@ export function updateArrangementStatus(
 }
 
 export function ignoreArrangement(arrangementId: string) {
+  const arrangements = getInitialArrangements();
+  const arrangement = arrangements.find((item) => item.id === arrangementId);
+  if (arrangement?.sourceContext && arrangement.sourceContext.sourceType !== "manual") {
+    return updateArrangementAIFeedback(arrangementId, "ignored", "ignored");
+  }
+
   return updateArrangementStatus(arrangementId, "ignored");
+}
+
+export function markArrangementAIWrong(arrangementId: string) {
+  return updateArrangementAIFeedback(arrangementId, "wrong", "ignored");
 }
 
 export function continueArrangement(arrangementId: string, fuzzyTimeLabel: string) {
@@ -456,6 +650,105 @@ function buildArrangementTimeFields(draft: ArrangementDraft): Pick<
   };
 }
 
+function buildArrangementTimeFieldsFromAI(result: ArrangementCandidateResult): Pick<
+  ArrangementItem,
+  "timeType" | "startTime" | "endTime" | "dueTime" | "fuzzyTimeLabel"
+> {
+  const arrangement = result.arrangement;
+
+  if (arrangement.timeType === "fuzzy") {
+    return {
+      timeType: "fuzzy",
+      startTime: null,
+      endTime: null,
+      dueTime: null,
+      fuzzyTimeLabel: normalizeText(arrangement.fuzzyTimeLabel) || "近期",
+    };
+  }
+
+  if (arrangement.timeType === "date") {
+    const startTime = parseAITime(arrangement.startTime);
+    if (startTime !== null) {
+      return {
+        timeType: "date",
+        startTime,
+        endTime: parseAITime(arrangement.endTime) ?? startTime + 24 * 60 * 60 * 1000 - 1,
+        dueTime: null,
+        fuzzyTimeLabel: "",
+      };
+    }
+  }
+
+  if (arrangement.timeType === "datetime") {
+    const startTime = parseAITime(arrangement.startTime);
+    if (startTime !== null) {
+      return {
+        timeType: "datetime",
+        startTime,
+        endTime: null,
+        dueTime: null,
+        fuzzyTimeLabel: "",
+      };
+    }
+  }
+
+  if (arrangement.timeType === "range") {
+    const startTime = parseAITime(arrangement.startTime);
+    const endTime = parseAITime(arrangement.endTime);
+    if (startTime !== null) {
+      return {
+        timeType: "range",
+        startTime,
+        endTime,
+        dueTime: null,
+        fuzzyTimeLabel: "",
+      };
+    }
+  }
+
+  if (arrangement.timeType === "due") {
+    const dueTime = parseAITime(arrangement.dueTime);
+    if (dueTime !== null) {
+      return {
+        timeType: "due",
+        startTime: null,
+        endTime: null,
+        dueTime,
+        fuzzyTimeLabel: "",
+      };
+    }
+  }
+
+  return {
+    timeType: "none",
+    startTime: null,
+    endTime: null,
+    dueTime: null,
+    fuzzyTimeLabel: "",
+  };
+}
+
+function buildArrangementReminderFromAI(
+  result: ArrangementCandidateResult,
+  timeFields: Pick<
+    ArrangementItem,
+    "timeType" | "startTime" | "endTime" | "dueTime" | "fuzzyTimeLabel"
+  >
+): ArrangementReminder {
+  const plannedTime = getReminderBaseTime(timeFields);
+  if (result.arrangement.type !== "reminder" || plannedTime === null) {
+    return createEmptyReminder("ai");
+  }
+
+  return {
+    enabled: true,
+    remindAt: plannedTime,
+    offsetMinutes: 0,
+    repeatRule: null,
+    createdFrom: "ai",
+  };
+}
+
 function buildArrangementReminder(
   draft: ArrangementDraft,
   timeFields: Pick<
@@ -494,13 +787,13 @@ function getReminderBaseTime(
   return null;
 }
 
-function createEmptyReminder(): ArrangementReminder {
+function createEmptyReminder(createdFrom: ArrangementReminder["createdFrom"] = "manual"): ArrangementReminder {
   return {
     enabled: false,
     remindAt: null,
     offsetMinutes: null,
     repeatRule: null,
-    createdFrom: "manual",
+    createdFrom,
   };
 }
 
@@ -523,6 +816,71 @@ function parseDateInput(value: string, edge: "start" | "end") {
 function parseDateTimeInput(value: string) {
   const timestamp = new Date(normalizeText(value)).getTime();
   return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function parseAITime(value: string | null) {
+  if (!value) return null;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function uniqueTextValues(values: string[]) {
+  return Array.from(new Set(values.map(normalizeText).filter(Boolean)));
+}
+
+function normalizeAISourceScene(value: ArrangementAIScene | undefined) {
+  if (value === "private_chat" || value === "group_chat" || value === "self_chat") {
+    return value;
+  }
+
+  return "self_chat";
+}
+
+function getDefaultAISourceLabel(scene: ArrangementSourceContext["sourceType"]) {
+  if (scene === "private_chat") return "私聊消息";
+  if (scene === "group_chat") return "群聊消息";
+  if (scene === "self_chat") return "发给自己的消息";
+  return "手动创建";
+}
+
+function updateArrangementAIFeedback(
+  arrangementId: string,
+  feedbackStatus: ArrangementAIFeedback["status"],
+  nextStatus: ArrangementStatus
+) {
+  const arrangements = getInitialArrangements();
+  let updatedArrangement: ArrangementItem | null = null;
+
+  const updatedArrangements = arrangements.map((arrangement) => {
+    if (arrangement.id !== arrangementId) return arrangement;
+
+    const timestamp = Date.now();
+    const nextArrangement: ArrangementItem = {
+      ...arrangement,
+      status: nextStatus,
+      aiFeedback: {
+        status: feedbackStatus,
+        updatedAt: timestamp,
+      },
+      updatedAt: timestamp,
+    };
+
+    updatedArrangement = nextArrangement;
+    return nextArrangement;
+  });
+
+  if (!updatedArrangement) return null;
+  persistArrangements(updatedArrangements);
+  return updatedArrangement;
+}
+
+export function hasArrangementForSourceMessage(sourceMessageId: string) {
+  const normalizedSourceMessageId = normalizeText(sourceMessageId);
+  if (!normalizedSourceMessageId) return false;
+
+  return getInitialArrangements().some((arrangement) =>
+    arrangement.sourceMessageIds.includes(normalizedSourceMessageId)
+  );
 }
 
 export function notifyArrangementChange() {

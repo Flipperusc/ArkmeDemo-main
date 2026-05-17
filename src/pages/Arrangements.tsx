@@ -7,11 +7,16 @@ import {
   createArrangement,
   getInitialArrangements,
   ignoreArrangement,
+  markArrangementAIWrong,
   updateArrangement,
   updateArrangementStatus,
   type ArrangementDraft,
   type ArrangementDraftTimeType,
 } from "@/data/arrangements";
+import {
+  recordArrangementAIFeedback,
+  updateArrangementAICandidateStatus,
+} from "@/data/arrangementAIRecords";
 import { cn } from "@/lib/utils";
 import { usePreferences } from "@/settings/preferences";
 import type { ArrangementItem, ArrangementStatus } from "@/types/arrangement";
@@ -121,6 +126,10 @@ export default function Arrangements() {
     const arrangement = createArrangement(draft);
     if (!arrangement) return;
 
+    if (arrangement.sourceContext && arrangement.sourceContext.sourceType !== "manual") {
+      recordArrangementFeedback(arrangement, "edited");
+    }
+
     refreshArrangements();
     setSelectedArrangementId(arrangement.id);
     setViewMode("detail");
@@ -166,7 +175,22 @@ export default function Arrangements() {
   };
 
   const handleIgnore = (arrangementId: string) => {
+    const arrangement = arrangements.find((item) => item.id === arrangementId);
     ignoreArrangement(arrangementId);
+    if (arrangement?.sourceContext && arrangement.sourceContext.sourceType !== "manual") {
+      recordArrangementFeedback(arrangement, "ignored");
+    }
+    refreshArrangements();
+    setSelectedArrangementId(null);
+    setViewMode("list");
+  };
+
+  const handleMarkAIWrong = (arrangementId: string) => {
+    const arrangement = arrangements.find((item) => item.id === arrangementId);
+    markArrangementAIWrong(arrangementId);
+    if (arrangement?.sourceContext && arrangement.sourceContext.sourceType !== "manual") {
+      recordArrangementFeedback(arrangement, "wrong");
+    }
     refreshArrangements();
     setSelectedArrangementId(null);
     setViewMode("list");
@@ -208,6 +232,7 @@ export default function Arrangements() {
         onRestore={() => handleRestorePending(selectedArrangement.id)}
         onContinueFocus={() => handleContinueFocus(selectedArrangement.id)}
         onIgnore={() => handleIgnore(selectedArrangement.id)}
+        onMarkAIWrong={() => handleMarkAIWrong(selectedArrangement.id)}
       />
     );
   }
@@ -978,6 +1003,7 @@ function ArrangementDetailScreen({
   onRestore,
   onContinueFocus,
   onIgnore,
+  onMarkAIWrong,
 }: {
   arrangement: ArrangementItem;
   locale: string;
@@ -989,6 +1015,7 @@ function ArrangementDetailScreen({
   onRestore: () => void;
   onContinueFocus: () => void;
   onIgnore: () => void;
+  onMarkAIWrong: () => void;
 }) {
   const { t } = usePreferences();
   const statusMeta = getStatusMeta(arrangement.status, t);
@@ -1075,9 +1102,74 @@ function ArrangementDetailScreen({
           <p className="text-[13px] font-medium leading-5 text-text-muted">
             {t("arrangements.sourceContext")}
           </p>
-          <p className="mt-2 rounded-[14px] bg-surface-muted px-3 py-2 text-[14px] leading-6 text-text-muted">
-            {t("arrangements.sourceManual")}
-          </p>
+          {arrangement.sourceContext && arrangement.sourceContext.sourceType !== "manual" ? (
+            <div className="mt-2 space-y-2">
+              <p className="rounded-[14px] bg-surface-muted px-3 py-2 text-[14px] leading-6 text-text-muted">
+                {arrangement.sourceContext.sourceLabel || t("arrangements.sourceSelfChat")}
+              </p>
+              <div className="rounded-[14px] bg-surface-muted px-3 py-2">
+                <p className="text-[12px] font-medium leading-5 text-text-tertiary">
+                  {t("arrangements.sourceOriginal")}
+                </p>
+                <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
+                  {arrangement.sourceContext.messageContent}
+                </p>
+              </div>
+              {arrangement.sourceContext.requestMessageContent && (
+                <div className="rounded-[14px] bg-surface-muted px-3 py-2">
+                  <p className="text-[12px] font-medium leading-5 text-text-tertiary">
+                    {t("arrangements.sourceRequest")}
+                  </p>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
+                    {arrangement.sourceContext.requestMessageContent}
+                  </p>
+                </div>
+              )}
+              {arrangement.sourceContext.commitmentMessageContent && (
+                <div className="rounded-[14px] bg-surface-muted px-3 py-2">
+                  <p className="text-[12px] font-medium leading-5 text-text-tertiary">
+                    {t("arrangements.sourceCommitment")}
+                  </p>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-[14px] leading-6 text-text-muted">
+                    {arrangement.sourceContext.commitmentMessageContent}
+                  </p>
+                </div>
+              )}
+              {arrangement.sourceContext.executor && (
+                <DetailRow
+                  label={t("arrangements.sourceExecutor")}
+                  value={arrangement.sourceContext.executor}
+                />
+              )}
+              {arrangement.sourceContext.beneficiary && (
+                <DetailRow
+                  label={t("arrangements.sourceBeneficiary")}
+                  value={arrangement.sourceContext.beneficiary}
+                />
+              )}
+              <DetailRow
+                label={t("arrangements.sourceDetectedAt")}
+                value={
+                  arrangement.sourceContext.detectedAt
+                    ? formatFullDateTime(arrangement.sourceContext.detectedAt, locale)
+                    : t("arrangements.timeUnset")
+                }
+              />
+              <DetailRow
+                label={t("arrangements.sourceConfidence")}
+                value={
+                  arrangement.sourceContext.confidence !== null
+                    ? `${Math.round(arrangement.sourceContext.confidence * 100)}%`
+                    : "-"
+                }
+                last
+              />
+            </div>
+          ) : (
+            <p className="mt-2 rounded-[14px] bg-surface-muted px-3 py-2 text-[14px] leading-6 text-text-muted">
+              {t("arrangements.sourceManual")}
+            </p>
+          )}
         </section>
 
         {arrangement.status === "later" && (
@@ -1140,6 +1232,11 @@ function ArrangementDetailScreen({
           <Button className="h-11 rounded-full" variant="ghost" onClick={onIgnore}>
             {t("arrangements.ignore")}
           </Button>
+          {arrangement.sourceContext && arrangement.sourceContext.sourceType !== "manual" && (
+            <Button className="h-11 rounded-full" variant="ghost" onClick={onMarkAIWrong}>
+              {t("arrangements.markAIWrong")}
+            </Button>
+          )}
         </div>
       </div>
     </div>
@@ -1199,6 +1296,27 @@ function getStatusMeta(
     label: t("arrangements.status.pending"),
     className: "bg-primary-soft text-primary",
   };
+}
+
+function recordArrangementFeedback(
+  arrangement: ArrangementItem,
+  action: "edited" | "ignored" | "wrong"
+) {
+  const sourceContext = arrangement.sourceContext;
+  if (!sourceContext || sourceContext.sourceType === "manual") return;
+
+  if (sourceContext.candidateId) {
+    updateArrangementAICandidateStatus(sourceContext.candidateId, action, arrangement.id);
+  }
+
+  recordArrangementAIFeedback({
+    action,
+    scene: sourceContext.sourceType,
+    sourceMessageId: sourceContext.messageId,
+    sourceText: sourceContext.messageContent,
+    arrangementId: arrangement.id,
+    ...(sourceContext.candidateId ? { candidateId: sourceContext.candidateId } : {}),
+  });
 }
 
 function formatArrangementTime(
