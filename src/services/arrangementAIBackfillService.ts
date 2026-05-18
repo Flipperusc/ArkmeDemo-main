@@ -3,7 +3,9 @@ import {
   getInitialTestIdentities,
   getInitialTestMessages,
   demoSenderIdentityId,
+  type TestIdentity,
 } from "@/data/testConversations";
+import { getCandidateProfile } from "@/data/candidateProfile";
 import {
   hasProcessedArrangementAIMessage,
   recordArrangementAIFeedback,
@@ -27,11 +29,19 @@ import {
   analyzeArrangementSimilarityMerge,
   selectSimilarArrangementMergeCandidates,
 } from "@/services/arrangementSimilarityMergeService";
+import {
+  analyzeGroupChatRelatedArrangement,
+  buildGroupChatMentionInfo,
+  convertGroupRelatedArrangementToCandidate,
+  shouldConsiderGroupChatRelatedArrangement,
+} from "@/services/groupChatRelatedArrangementAIService";
 import type { AISettings } from "@/types/ai";
 import type {
   ArrangementAIScene,
   ArrangementCandidateInput,
   ArrangementCandidateResult,
+  GroupChatRelatedArrangementInput,
+  GroupChatRelatedArrangementResult,
 } from "@/types/arrangementAI";
 import type { RecordItem } from "@/types/record";
 
@@ -85,6 +95,9 @@ type ArrangementBackfillRunOptions = {
   analyze?: (
     input: ArrangementCandidateInput
   ) => Promise<{ ok: true; data: ArrangementCandidateResult } | { ok: false }>;
+  analyzeGroup?: (
+    input: GroupChatRelatedArrangementInput
+  ) => Promise<{ ok: true; data: GroupChatRelatedArrangementResult } | { ok: false }>;
 };
 
 export function getArrangementBackfillConversationOptions() {
@@ -159,6 +172,7 @@ export async function runArrangementBackfill(
     message: "",
   };
   const analyze = options.analyze ?? analyzeArrangementCandidate;
+  const analyzeGroup = options.analyzeGroup ?? analyzeGroupChatRelatedArrangement;
 
   for (const target of targets) {
     if (
@@ -172,6 +186,110 @@ export async function runArrangementBackfill(
     result.scanned += 1;
 
     try {
+      if (target.scene === "group_chat") {
+        const groupInput = buildGroupRelatedBackfillInput(target);
+        if (
+          !shouldConsiderGroupChatRelatedArrangement({
+            messages: groupInput.messages,
+            currentMessageId: target.id,
+            currentUserId: demoSenderIdentityId,
+            currentUserAliases: groupInput.currentUserAliases ?? [],
+          })
+        ) {
+          result.skipped += 1;
+          continue;
+        }
+
+        const analyzedGroup = await analyzeGroup(groupInput);
+        if (!analyzedGroup.ok) {
+          result.failed += 1;
+          continue;
+        }
+
+        const groupResult = analyzedGroup.data;
+        const candidateResult = convertGroupRelatedArrangementToCandidate(groupResult);
+        const source = buildGroupBackfillSource(target, groupInput, groupResult);
+        const shouldTrack =
+          groupResult.hasArrangement &&
+          groupResult.isRelatedToCurrentUser &&
+          groupResult.relationReason !== "not_related" &&
+          groupResult.confidence >= 0.5;
+
+        if (!shouldTrack) {
+          saveArrangementAICandidate({
+            scene: "group_chat",
+            sourceMessageId: target.id,
+            sourceMessageIds: source.sourceMessageIds,
+            sourceText: source.sourceText,
+            sourceLabel: target.conversationLabel,
+            sourceMessages: source.sourceMessages,
+            executorLabel: source.executorLabel,
+            beneficiaryLabel: source.beneficiaryLabel,
+            relationReason: groupResult.relationReason,
+            detectedAt: Date.now(),
+            confidence: groupResult.confidence,
+            result: candidateResult,
+            status: "ignored",
+          });
+          result.ignored += 1;
+          continue;
+        }
+
+        const candidate = saveArrangementAICandidate({
+          scene: "group_chat",
+          sourceMessageId: target.id,
+          sourceMessageIds: source.sourceMessageIds,
+          sourceText: source.sourceText,
+          sourceLabel: target.conversationLabel,
+          sourceMessages: source.sourceMessages,
+          executorLabel: source.executorLabel,
+          beneficiaryLabel: source.beneficiaryLabel,
+          relationReason: groupResult.relationReason,
+          detectedAt: Date.now(),
+          confidence: groupResult.confidence,
+          result: candidateResult,
+          status: "pending",
+        });
+
+        if (groupResult.shouldCreate && groupResult.confidence >= 0.8) {
+          const arrangement = createArrangementFromAICandidate(candidateResult, {
+            scene: "group_chat",
+            sourceLabel: target.conversationLabel,
+            sourceMessageId: target.id,
+            sourceMessageIds: source.sourceMessageIds,
+            sourceText: source.sourceText,
+            requestMessageId: source.requestMessageId,
+            requestMessageContent: source.requestMessageContent,
+            commitmentMessageId: source.commitmentMessageId,
+            commitmentMessageContent: source.commitmentMessageContent,
+            executor: source.executorLabel,
+            beneficiary: source.beneficiaryLabel,
+            relationReason: groupResult.relationReason,
+            detectedAt: candidate.detectedAt,
+            confidence: groupResult.confidence,
+            candidateId: candidate.id,
+            feedbackStatus: "auto_created",
+          });
+
+          if (arrangement) {
+            updateArrangementAICandidateStatus(candidate.id, "auto_created", arrangement.id);
+            recordArrangementAIFeedback({
+              action: "auto_created",
+              scene: "group_chat",
+              sourceMessageId: target.id,
+              sourceText: target.content,
+              candidateId: candidate.id,
+              arrangementId: arrangement.id,
+            });
+            result.created += 1;
+            continue;
+          }
+        }
+
+        result.pending += 1;
+        continue;
+      }
+
       const analyzed = await analyze({
         scene: target.scene,
         currentUserId: "self",
@@ -208,10 +326,7 @@ export async function runArrangementBackfill(
         continue;
       }
 
-      if (
-        target.scene !== "group_chat" &&
-        !hasProcessedArrangementMergeMessage(target.id)
-      ) {
+      if (!hasProcessedArrangementMergeMessage(target.id)) {
         const candidateArrangements = selectSimilarArrangementMergeCandidates({
           arrangements: getInitialArrangements(),
           sourceType: target.scene,
@@ -389,6 +504,158 @@ function collectTestConversationTargets(): ArrangementBackfillTarget[] {
   });
 }
 
+function buildGroupRelatedBackfillInput(
+  target: ArrangementBackfillTarget
+): GroupChatRelatedArrangementInput {
+  const identities = getInitialTestIdentities();
+  const groups = getInitialTestGroups();
+  const group = groups.find((item) => item.id === target.conversationId);
+  const selfName = getCandidateProfile()?.name || "我";
+  const currentUserAliases = buildCurrentUserAliases(selfName);
+  const memberSummaries = [
+    {
+      id: demoSenderIdentityId,
+      name: selfName,
+      nicknames: currentUserAliases,
+    },
+    ...(group?.memberIdentityIds ?? [])
+      .map((identityId) => identities.find((identity) => identity.id === identityId))
+      .filter((identity): identity is TestIdentity => Boolean(identity))
+      .map((identity) => ({
+        id: identity.id,
+        name: identity.name,
+        nicknames: [identity.avatarLabel],
+      })),
+  ];
+  const contextMessages = getInitialTestMessages()
+    .filter(
+      (message) =>
+        message.conversationId === target.conversationId &&
+        message.conversationType === "group" &&
+        message.sentAt <= target.createdAt
+    )
+    .sort((a, b) => a.sentAt - b.sentAt)
+    .slice(-20);
+  const messages = contextMessages.map((message) => ({
+    id: message.id,
+    senderId: message.sender === "demo" ? demoSenderIdentityId : message.identityId,
+    senderName:
+      message.sender === "demo"
+        ? selfName
+        : identities.find((identity) => identity.id === message.identityId)?.name ||
+          "群成员",
+    content: message.text,
+    createdAt: new Date(message.sentAt).toISOString(),
+  }));
+
+  return {
+    currentUserId: demoSenderIdentityId,
+    currentUserName: selfName,
+    currentUserAliases,
+    groupId: target.conversationId,
+    groupName: group?.name ?? target.conversationLabel.replace(/^群聊：/, ""),
+    messages,
+    memberSummaries,
+    mentions: buildGroupChatMentionInfo(
+      messages,
+      demoSenderIdentityId,
+      currentUserAliases,
+      memberSummaries
+    ),
+    existingArrangements: getInitialArrangements().filter(
+      (arrangement) => arrangement.status === "pending"
+    ),
+    timezone: getRuntimeTimezone(),
+    now: new Date().toISOString(),
+  };
+}
+
+function buildGroupBackfillSource(
+  target: ArrangementBackfillTarget,
+  input: GroupChatRelatedArrangementInput,
+  result: GroupChatRelatedArrangementResult
+) {
+  const sourceIds = uniqueTextValues([
+    target.id,
+    ...result.arrangement.sourceMessageIds,
+  ]);
+  const sourceMessages = input.messages.filter((message) => sourceIds.includes(message.id));
+  const sourceText =
+    sourceMessages.map((message) => formatGroupBackfillMessage(message)).join("\n") ||
+    target.content;
+  const requestMessage =
+    [...sourceMessages].reverse().find((message) => message.senderId !== demoSenderIdentityId) ??
+    null;
+  const commitmentMessage =
+    [...sourceMessages].reverse().find((message) => message.senderId === demoSenderIdentityId) ??
+    null;
+
+  return {
+    sourceMessageIds: uniqueTextValues([
+      ...sourceIds,
+      ...sourceMessages.map((message) => message.id),
+    ]),
+    sourceText,
+    sourceMessages: sourceMessages.map((message) => ({
+      id: message.id,
+      role:
+        message.senderId === demoSenderIdentityId
+          ? ("commitment" as const)
+          : ("request" as const),
+      senderName: message.senderName,
+      content: message.content,
+      createdAt: new Date(message.createdAt).getTime(),
+    })),
+    requestMessageId: requestMessage?.id,
+    requestMessageContent: requestMessage
+      ? formatGroupBackfillMessage(requestMessage)
+      : undefined,
+    commitmentMessageId: commitmentMessage?.id,
+    commitmentMessageContent: commitmentMessage
+      ? formatGroupBackfillMessage(commitmentMessage)
+      : undefined,
+    executorLabel: formatGroupParticipant(
+      result.arrangement.executor,
+      input.currentUserName || "我",
+      input.memberSummaries ?? []
+    ),
+    beneficiaryLabel: formatGroupParticipant(
+      result.arrangement.beneficiary,
+      input.currentUserName || "我",
+      input.memberSummaries ?? []
+    ),
+  };
+}
+
+function buildCurrentUserAliases(selfName: string) {
+  const aliases = [selfName, "我", "我这边"];
+  const characters = Array.from(selfName.trim());
+  const lastCharacter = characters.at(-1);
+  if (lastCharacter && lastCharacter !== selfName) {
+    aliases.push(lastCharacter, `小${lastCharacter}`);
+  }
+  return uniqueTextValues(aliases);
+}
+
+function formatGroupParticipant(
+  value: string,
+  selfName: string,
+  memberSummaries: NonNullable<GroupChatRelatedArrangementInput["memberSummaries"]>
+) {
+  if (value === "current_user") return selfName || "我";
+  const member = memberSummaries.find(
+    (item) => item.id === value || item.name === value
+  );
+  return member?.name || value;
+}
+
+function formatGroupBackfillMessage(message: {
+  senderName?: string;
+  content: string;
+}) {
+  return message.senderName ? `${message.senderName}：${message.content}` : message.content;
+}
+
 function readSelfRecords(): RecordItem[] {
   if (typeof window === "undefined") return [];
 
@@ -455,6 +722,10 @@ function getRuntimeTimezone() {
 
 function normalizeText(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function uniqueTextValues(values: string[]) {
+  return Array.from(new Set(values.map(normalizeText).filter(Boolean)));
 }
 
 function normalizeTimestamp(value: unknown) {

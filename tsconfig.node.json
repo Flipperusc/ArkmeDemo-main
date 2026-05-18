@@ -5,7 +5,14 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "allowSyntheticDefaultImports": true,
-    "types": ["node"]
+    "types": ["node"],
+    "outDir": ".tsbuild/node",
+    "tsBuildInfoFile": ".tsbuild/tsconfig.node.tsbuildinfo"
   },
-  "include": ["vite.config.ts", "tailwind.config.ts", "postcss.config.cjs"]
+  "include": [
+    "vite.config.ts",
+    "tailwind.config.ts",
+    "postcss.config.cjs",
+    "shared/**/*.ts"
+  ]
 }

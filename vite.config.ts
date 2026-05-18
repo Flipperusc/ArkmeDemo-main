@@ -3,16 +3,18 @@ import { defineConfig, type Plugin, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  DEFAULT_DEEPSEEK_BASE_URL,
+  DEFAULT_DEEPSEEK_MAX_TOKENS,
+  DEFAULT_DEEPSEEK_MODEL,
+  DEFAULT_REASONING_EFFORT,
+  DEFAULT_THINKING_MODE,
+  type AIReasoningEffort,
+  type AIThinkingMode,
+} from "./shared/aiDefaults";
 
 const rootDir = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com";
-const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro";
-const DEFAULT_DEEPSEEK_MAX_TOKENS = 2000;
-const DEFAULT_THINKING_MODE: AIThinkingMode = "disabled";
-const DEFAULT_REASONING_EFFORT: AIReasoningEffort = "high";
 
-type AIThinkingMode = "disabled" | "enabled";
-type AIReasoningEffort = "high" | "max";
 type DeepSeekMessage = {
   role: "system" | "user" | "assistant";
   content: string;

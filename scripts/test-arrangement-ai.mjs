@@ -24,6 +24,20 @@ const {
   analyzeArrangementSimilarityMerge,
   selectSimilarArrangementMergeCandidates,
 } = loadTsModule(path.join(rootDir, "src/services/arrangementSimilarityMergeService.ts"));
+const {
+  analyzeArrangementStatusChange,
+  selectArrangementStatusChangeCandidates,
+} = loadTsModule(path.join(rootDir, "src/services/arrangementStatusChangeService.ts"));
+const {
+  analyzeGroupChatRelatedArrangement,
+  buildGroupChatMentionInfo,
+  convertGroupRelatedArrangementToCandidate,
+  shouldConsiderGroupChatRelatedArrangement,
+} = loadTsModule(path.join(rootDir, "src/services/groupChatRelatedArrangementAIService.ts"));
+const {
+  analyzeArrangementAIAssist,
+  generateArrangementAIAssistContent,
+} = loadTsModule(path.join(rootDir, "src/services/arrangementAIAssistService.ts"));
 const { callDeepSeekJSON } = loadTsModule(
   path.join(rootDir, "src/services/deepseekClient.ts")
 );
@@ -126,6 +140,9 @@ runSelfChatArrangementCreationCase();
 await runPrivateChatCommitmentCase();
 await runPrivateChatSupplementMergeCase();
 await runSimilarArrangementContextMergeCase();
+await runArrangementStatusChangeCase();
+await runGroupChatRelatedArrangementCase();
+await runArrangementAIAssistCase();
 await runArrangementBackfillCase();
 
 console.log("arrangement ai tests passed");
@@ -908,15 +925,18 @@ async function runSimilarArrangementContextMergeCase() {
       now: "2026-05-17T09:05:10+08:00",
     },
     {
-      callJSON: async () => ({
-        ok: true,
-        data: similarMergeRaw({
-          targetArrangementId: hospitalArrangement.id,
-          mergeAction: "merge_duplicate",
-          sourceMessageIds: ["father-remind-1"],
-          reason: "与已有后天去医院安排主题和时间一致，是重复提醒。",
-        }),
-      }),
+      callJSON: async (request) => {
+        assert.equal(request.thinkingMode, "disabled");
+        return {
+          ok: true,
+          data: similarMergeRaw({
+            targetArrangementId: hospitalArrangement.id,
+            mergeAction: "merge_duplicate",
+            sourceMessageIds: ["father-remind-1"],
+            reason: "与已有后天去医院安排主题和时间一致，是重复提醒。",
+          }),
+        };
+      },
     }
   );
   assert.equal(fatherMerge.ok, true);
@@ -1114,6 +1134,730 @@ async function runSimilarArrangementContextMergeCase() {
   );
 }
 
+async function runArrangementStatusChangeCase() {
+  installWindowStorageStub();
+  const {
+    createArrangement,
+    applyArrangementStatusChange,
+    undoLastArrangementStatusChange,
+    getInitialArrangements,
+    hasArrangementForSourceMessage,
+  } = loadTsModule(path.join(rootDir, "src/data/arrangements.ts"));
+
+  const hospitalArrangement = createArrangement({
+    title: "今天上午去医院体检",
+    note: "体检后看看结果。",
+    timeType: "fuzzy",
+    fuzzyTimeLabel: "今天上午",
+    dateValue: "",
+    dateTimeValue: "",
+    dueValue: "",
+    reminderEnabled: false,
+    reminderOffsetMinutes: 30,
+  });
+  assert.ok(hospitalArrangement);
+
+  const completedCandidates = selectArrangementStatusChangeCandidates({
+    arrangements: getInitialArrangements(),
+    sourceType: "self_chat",
+    sourceLabel: "发给自己的消息",
+    sourceText: "我今天上午去医院体检了，没啥问题",
+    now: Date.now(),
+  });
+  assert.equal(completedCandidates[0].id, hospitalArrangement.id);
+  assert.ok(completedCandidates.length <= 5);
+
+  const completedResult = await analyzeArrangementStatusChange(
+    {
+      currentUserId: "self",
+      currentUserName: "庄骏",
+      sourceType: "self_chat",
+      sourceLabel: "发给自己的消息",
+      sourceMessageId: "status-hospital-done-1",
+      sourceText: "我今天上午去医院体检了，没啥问题",
+      sourceMessages: [
+        {
+          id: "status-hospital-done-1",
+          senderId: "self",
+          senderName: "庄骏",
+          content: "我今天上午去医院体检了，没啥问题",
+          createdAt: "2026-05-18T10:30:00+08:00",
+        },
+      ],
+      candidateArrangements: completedCandidates,
+      timezone: "Asia/Shanghai",
+      now: "2026-05-18T10:31:00+08:00",
+    },
+    {
+      callJSON: async (request) => {
+        assert.equal(request.thinkingMode, "disabled");
+        return {
+          ok: true,
+          data: statusChangeRaw({
+            relatedArrangementId: hospitalArrangement.id,
+            statusChangeType: "completed",
+            newStatus: "completed",
+            progressNote: "今天上午已去医院体检，结果没问题",
+            sourceMessageIds: ["status-hospital-done-1"],
+          }),
+        };
+      },
+    }
+  );
+  assert.equal(completedResult.ok, true);
+  assert.equal(completedResult.data.hasStatusChange, true);
+  assert.equal(completedResult.data.statusChangeType, "completed");
+
+  const completedArrangement = applyArrangementStatusChange({
+    targetArrangementId: completedResult.data.relatedArrangementId,
+    statusChangeType: completedResult.data.statusChangeType,
+    newStatus: completedResult.data.newStatus,
+    progressNote: completedResult.data.progressNote,
+    newTime: completedResult.data.newTime,
+    sourceMessageId: "status-hospital-done-1",
+    sourceMessageIds: completedResult.data.sourceMessageIds,
+    sourceText: "我今天上午去医院体检了，没啥问题",
+    sourceMessages: [
+      {
+        id: "status-hospital-done-1",
+        role: "status_change",
+        senderName: "庄骏",
+        content: "我今天上午去医院体检了，没啥问题",
+        createdAt: Date.now(),
+      },
+    ],
+    detectedAt: Date.now(),
+    confidence: completedResult.data.confidence,
+    reason: completedResult.data.reason,
+  });
+  assert.ok(completedArrangement);
+  assert.equal(completedArrangement.status, "completed");
+  assert.equal(completedArrangement.statusHistory.length, 1);
+  assert.equal(completedArrangement.relatedContexts.at(-1).role, "status_change");
+  assert.equal(hasArrangementForSourceMessage("status-hospital-done-1"), true);
+
+  const restoredAfterComplete = undoLastArrangementStatusChange(completedArrangement.id);
+  assert.ok(restoredAfterComplete);
+  assert.equal(restoredAfterComplete.status, "pending");
+  assert.equal(restoredAfterComplete.statusHistory.length, 0);
+
+  const progressResult = await analyzeArrangementStatusChange(
+    {
+      currentUserId: "self",
+      currentUserName: "庄骏",
+      sourceType: "self_chat",
+      sourceLabel: "发给自己的消息",
+      sourceMessageId: "status-hospital-progress-1",
+      sourceText: "已经挂号了",
+      sourceMessages: [
+        {
+          id: "status-hospital-progress-1",
+          senderId: "self",
+          senderName: "庄骏",
+          content: "已经挂号了",
+          createdAt: "2026-05-18T10:35:00+08:00",
+        },
+      ],
+      candidateArrangements: [restoredAfterComplete],
+      timezone: "Asia/Shanghai",
+      now: "2026-05-18T10:36:00+08:00",
+    },
+    {
+      callJSON: async () => ({
+        ok: true,
+        data: statusChangeRaw({
+          relatedArrangementId: restoredAfterComplete.id,
+          statusChangeType: "in_progress",
+          newStatus: "in_progress",
+          progressNote: "已经挂号",
+          sourceMessageIds: ["status-hospital-progress-1"],
+        }),
+      }),
+    }
+  );
+  assert.equal(progressResult.data.statusChangeType, "in_progress");
+  const progressArrangement = applyArrangementStatusChange({
+    targetArrangementId: progressResult.data.relatedArrangementId,
+    statusChangeType: progressResult.data.statusChangeType,
+    newStatus: progressResult.data.newStatus,
+    progressNote: progressResult.data.progressNote,
+    newTime: progressResult.data.newTime,
+    sourceMessageId: "status-hospital-progress-1",
+    sourceMessageIds: progressResult.data.sourceMessageIds,
+    sourceText: "已经挂号了",
+    sourceMessages: [
+      {
+        id: "status-hospital-progress-1",
+        role: "progress",
+        senderName: "庄骏",
+        content: "已经挂号了",
+        createdAt: Date.now(),
+      },
+    ],
+    detectedAt: Date.now(),
+    confidence: progressResult.data.confidence,
+    reason: progressResult.data.reason,
+  });
+  assert.ok(progressArrangement);
+  assert.equal(progressArrangement.status, "in_progress");
+  assert.equal(progressArrangement.progressNotes.at(-1).content, "已经挂号");
+
+  const rescheduledCandidates = selectArrangementStatusChangeCandidates({
+    arrangements: getInitialArrangements(),
+    sourceType: "self_chat",
+    sourceLabel: "发给自己的消息",
+    sourceText: "改到下周了",
+    now: Date.now(),
+  });
+  assert.ok(rescheduledCandidates.some((arrangement) => arrangement.id === progressArrangement.id));
+  const rescheduledResult = await analyzeArrangementStatusChange(
+    {
+      currentUserId: "self",
+      currentUserName: "庄骏",
+      sourceType: "self_chat",
+      sourceLabel: "发给自己的消息",
+      sourceMessageId: "status-hospital-rescheduled-1",
+      sourceText: "改到下周了",
+      sourceMessages: [
+        {
+          id: "status-hospital-rescheduled-1",
+          senderId: "self",
+          senderName: "庄骏",
+          content: "改到下周了",
+          createdAt: "2026-05-18T11:00:00+08:00",
+        },
+      ],
+      candidateArrangements: rescheduledCandidates,
+      timezone: "Asia/Shanghai",
+      now: "2026-05-18T11:01:00+08:00",
+    },
+    {
+      callJSON: async () => ({
+        ok: true,
+        data: statusChangeRaw({
+          relatedArrangementId: progressArrangement.id,
+          statusChangeType: "rescheduled",
+          newStatus: "in_progress",
+          newTime: "下周",
+          sourceMessageIds: ["status-hospital-rescheduled-1"],
+          needsUserConfirmation: false,
+        }),
+      }),
+    }
+  );
+  assert.equal(rescheduledResult.data.statusChangeType, "rescheduled");
+  assert.equal(rescheduledResult.data.needsUserConfirmation, true);
+
+  const sendArrangement = createArrangement({
+    title: "把材料发给他",
+    note: "",
+    timeType: "none",
+    fuzzyTimeLabel: "",
+    dateValue: "",
+    dateTimeValue: "",
+    dueValue: "",
+    reminderEnabled: false,
+    reminderOffsetMinutes: 30,
+  });
+  assert.ok(sendArrangement);
+  const sendCandidates = selectArrangementStatusChangeCandidates({
+    arrangements: getInitialArrangements(),
+    sourceType: "self_chat",
+    sourceLabel: "发给自己的消息",
+    sourceText: "我已经发给他了",
+    now: Date.now(),
+  });
+  assert.equal(sendCandidates[0].id, sendArrangement.id);
+
+  const lowConfidence = await analyzeArrangementStatusChange(
+    {
+      currentUserId: "self",
+      currentUserName: "庄骏",
+      sourceType: "self_chat",
+      sourceLabel: "发给自己的消息",
+      sourceMessageId: "status-low-1",
+      sourceText: "好像差不多了",
+      sourceMessages: [
+        {
+          id: "status-low-1",
+          senderId: "self",
+          senderName: "庄骏",
+          content: "好像差不多了",
+          createdAt: "2026-05-18T11:10:00+08:00",
+        },
+      ],
+      candidateArrangements: [sendArrangement],
+      timezone: "Asia/Shanghai",
+      now: "2026-05-18T11:11:00+08:00",
+    },
+    {
+      callJSON: async () => ({
+        ok: true,
+        data: statusChangeRaw({
+          hasStatusChange: true,
+          relatedArrangementId: sendArrangement.id,
+          confidence: 0.42,
+          statusChangeType: "completed",
+          newStatus: "completed",
+          sourceMessageIds: ["status-low-1"],
+        }),
+      }),
+    }
+  );
+  assert.equal(lowConfidence.data.hasStatusChange, false);
+}
+
+async function runGroupChatRelatedArrangementCase() {
+  const mentionedInput = createGroupRelatedInput([
+    {
+      id: "group-mentioned-1",
+      senderId: "identity-xiaowang",
+      senderName: "小王",
+      content: "@庄骏 明天评审会你带一下资料",
+      createdAt: "2026-05-18T09:00:00+08:00",
+    },
+  ]);
+  assert.equal(
+    shouldConsiderGroupChatRelatedArrangement({
+      messages: mentionedInput.messages,
+      currentMessageId: "group-mentioned-1",
+      currentUserId: "demo",
+      currentUserAliases: mentionedInput.currentUserAliases,
+    }),
+    true
+  );
+  assert.equal(mentionedInput.mentions[0].mentionedCurrentUser, true);
+
+  const mentionedResult = await analyzeGroupChatRelatedArrangement(mentionedInput, {
+    callJSON: async () => ({
+      ok: true,
+      data: groupRelatedRaw({
+        relationReason: "mentioned",
+        hasUserCommitted: false,
+        arrangement: {
+          title: "明天评审会带资料",
+          summary: "群聊中小王 @ 当前用户，要求明天评审会带资料。",
+          type: "commitment",
+          timeType: "fuzzy",
+          fuzzyTimeLabel: "明天",
+          executor: "current_user",
+          beneficiary: "",
+          relatedPeople: ["小王", "庄骏"],
+          items: ["资料"],
+          sourceMessageIds: ["group-mentioned-1"],
+        },
+      }),
+    }),
+  });
+  assert.equal(mentionedResult.ok, true);
+  assert.equal(mentionedResult.data.shouldCreate, true);
+  assert.equal(mentionedResult.data.relationReason, "mentioned");
+
+  const mentionedCandidate = convertGroupRelatedArrangementToCandidate(
+    mentionedResult.data
+  );
+  assert.equal(mentionedCandidate.action, "create");
+  assertCompleteShape(mentionedCandidate);
+
+  installWindowStorageStub();
+  const { createArrangementFromAICandidate } = loadTsModule(
+    path.join(rootDir, "src/data/arrangements.ts")
+  );
+  const mentionedArrangement = createArrangementFromAICandidate(mentionedCandidate, {
+    scene: "group_chat",
+    sourceLabel: "群聊：工作群",
+    sourceMessageId: "group-mentioned-1",
+    sourceMessageIds: ["group-mentioned-1"],
+    sourceText: "小王：@庄骏 明天评审会你带一下资料",
+    requestMessageId: "group-mentioned-1",
+    requestMessageContent: "小王：@庄骏 明天评审会你带一下资料",
+    executor: "庄骏",
+    relationReason: mentionedResult.data.relationReason,
+    detectedAt: 1779066000000,
+    confidence: mentionedResult.data.confidence,
+    candidateId: "group-candidate-mentioned-1",
+    feedbackStatus: "auto_created",
+  });
+  assert.ok(mentionedArrangement);
+  assert.equal(mentionedArrangement.sourceType, "group_chat");
+  assert.equal(mentionedArrangement.sourceContext.sourceLabel, "群聊：工作群");
+  assert.equal(mentionedArrangement.sourceContext.relationReason, "mentioned");
+  assert.equal(mentionedArrangement.sourceContext.executor, "庄骏");
+
+  const committedInput = createGroupRelatedInput([
+    {
+      id: "group-commit-1",
+      senderId: "identity-xiaowang",
+      senderName: "小王",
+      content: "谁来处理这个问题？",
+      createdAt: "2026-05-18T09:03:00+08:00",
+    },
+    {
+      id: "group-commit-2",
+      senderId: "demo",
+      senderName: "庄骏",
+      content: "我来",
+      createdAt: "2026-05-18T09:04:00+08:00",
+    },
+  ]);
+  assert.equal(
+    shouldConsiderGroupChatRelatedArrangement({
+      messages: committedInput.messages,
+      currentMessageId: "group-commit-2",
+      currentUserId: "demo",
+      currentUserAliases: committedInput.currentUserAliases,
+    }),
+    true
+  );
+  const committedResult = await analyzeGroupChatRelatedArrangement(committedInput, {
+    callJSON: async () => ({
+      ok: true,
+      data: groupRelatedRaw({
+        relationReason: "committed",
+        hasUserCommitted: true,
+        arrangement: {
+          title: "处理群里提到的问题",
+          summary: "群里询问谁来处理问题，当前用户回复我来。",
+          type: "commitment",
+          executor: "current_user",
+          relatedPeople: ["小王", "庄骏"],
+          items: ["处理问题"],
+          sourceMessageIds: ["group-commit-1", "group-commit-2"],
+        },
+      }),
+    }),
+  });
+  assert.equal(committedResult.ok, true);
+  assert.equal(committedResult.data.hasUserCommitted, true);
+  assert.equal(committedResult.data.relationReason, "committed");
+  assert.equal(
+    convertGroupRelatedArrangementToCandidate(committedResult.data).action,
+    "create"
+  );
+
+  const otherInput = createGroupRelatedInput([
+    {
+      id: "group-other-1",
+      senderId: "identity-xiaowang",
+      senderName: "小王",
+      content: "张三明天把材料发给李四",
+      createdAt: "2026-05-18T09:08:00+08:00",
+    },
+  ]);
+  assert.equal(
+    shouldConsiderGroupChatRelatedArrangement({
+      messages: otherInput.messages,
+      currentMessageId: "group-other-1",
+      currentUserId: "demo",
+      currentUserAliases: otherInput.currentUserAliases,
+    }),
+    false
+  );
+  const otherResult = await analyzeGroupChatRelatedArrangement(otherInput, {
+    callJSON: async () => ({
+      ok: true,
+      data: groupRelatedRaw({
+        isRelatedToCurrentUser: false,
+        relationReason: "not_related",
+        shouldCreate: false,
+        confidence: 0.72,
+        arrangement: {
+          title: "张三明天发材料给李四",
+          executor: "张三",
+          beneficiary: "李四",
+          sourceMessageIds: ["group-other-1"],
+        },
+      }),
+    }),
+  });
+  assert.equal(otherResult.ok, true);
+  assert.equal(otherResult.data.isRelatedToCurrentUser, false);
+  assert.equal(
+    convertGroupRelatedArrangementToCandidate(otherResult.data).action,
+    "ignore"
+  );
+
+  const genericInput = createGroupRelatedInput([
+    {
+      id: "group-generic-1",
+      senderId: "identity-xiaowang",
+      senderName: "小王",
+      content: "大家记得早点来",
+      createdAt: "2026-05-18T09:10:00+08:00",
+    },
+  ]);
+  assert.equal(
+    shouldConsiderGroupChatRelatedArrangement({
+      messages: genericInput.messages,
+      currentMessageId: "group-generic-1",
+      currentUserId: "demo",
+      currentUserAliases: genericInput.currentUserAliases,
+    }),
+    false
+  );
+
+  const mediumInput = createGroupRelatedInput([
+    {
+      id: "group-medium-1",
+      senderId: "identity-xiaowang",
+      senderName: "小王",
+      content: "@庄骏 方便的话下周看一下材料",
+      createdAt: "2026-05-18T09:12:00+08:00",
+    },
+  ]);
+  const mediumResult = await analyzeGroupChatRelatedArrangement(mediumInput, {
+    callJSON: async () => ({
+      ok: true,
+      data: groupRelatedRaw({
+        relationReason: "mentioned",
+        confidence: 0.62,
+        shouldCreate: true,
+        needsUserConfirmation: false,
+        arrangement: {
+          title: "下周看一下材料",
+          summary: "小王在群里 @ 当前用户，但语气较弱，需要确认。",
+          type: "follow_up",
+          timeType: "fuzzy",
+          fuzzyTimeLabel: "下周",
+          executor: "current_user",
+          relatedPeople: ["小王", "庄骏"],
+          items: ["看材料"],
+          sourceMessageIds: ["group-medium-1"],
+        },
+      }),
+    }),
+  });
+  assert.equal(mediumResult.ok, true);
+  assert.equal(mediumResult.data.shouldCreate, false);
+  assert.equal(mediumResult.data.needsUserConfirmation, true);
+  assert.equal(
+    convertGroupRelatedArrangementToCandidate(mediumResult.data).action,
+    "needs_confirmation"
+  );
+}
+
+async function runArrangementAIAssistCase() {
+  installWindowStorageStub();
+  const {
+    addArrangementAIAssistGeneratedResult,
+    createArrangement,
+    getInitialArrangements,
+    saveArrangementAIAssistAnalysis,
+  } = loadTsModule(path.join(rootDir, "src/data/arrangements.ts"));
+
+  const hospitalArrangement = createArrangement({
+    title: "去医院检查",
+    note: "最近头晕，带上之前的检查报告。",
+    timeType: "fuzzy",
+    fuzzyTimeLabel: "明天上午",
+    dateValue: "",
+    dateTimeValue: "",
+    dueValue: "",
+    reminderEnabled: false,
+    reminderOffsetMinutes: 30,
+  });
+  assert.ok(hospitalArrangement);
+
+  const hospitalSuggestion = await analyzeArrangementAIAssist(
+    {
+      currentUserId: "demo",
+      currentUserName: "庄骏",
+      arrangement: hospitalArrangement,
+      timezone: "Asia/Shanghai",
+      now: "2026-05-18T12:30:00+08:00",
+    },
+    {
+      callJSON: async (request) => {
+        assert.equal(request.thinkingMode, "disabled");
+        assert.ok(request.maxTokens <= 1600);
+        return {
+          ok: true,
+          data: assistSuggestionRaw({
+            suggestedActions: [
+              {
+                actionId: "organize_symptoms",
+                title: "整理症状",
+                description: "把备注中的症状整理成就诊前可查看的清单",
+                riskLevel: "low",
+                requiresUserConfirmation: false,
+                outputType: "summary",
+              },
+              {
+                actionId: "prepare_questions",
+                title: "整理要问医生的问题",
+                description: "生成就诊时可向医生确认的问题清单",
+                riskLevel: "low",
+                requiresUserConfirmation: false,
+                outputType: "draft",
+              },
+              {
+                actionId: "prepare_checklist",
+                title: "生成携带清单",
+                description: "列出检查前可能需要携带的资料",
+                riskLevel: "low",
+                requiresUserConfirmation: false,
+                outputType: "checklist",
+              },
+            ],
+          }),
+        };
+      },
+    }
+  );
+  assert.equal(hospitalSuggestion.ok, true);
+  assert.equal(hospitalSuggestion.data.executionType, "ai_assist");
+  assert.equal(hospitalSuggestion.data.suggestedActions.length, 3);
+  assert.equal(
+    hospitalSuggestion.data.suggestedActions.every(
+      (action) => action.requiresUserConfirmation
+    ),
+    true
+  );
+
+  const savedHospital = saveArrangementAIAssistAnalysis(
+    hospitalArrangement.id,
+    hospitalSuggestion.data
+  );
+  assert.ok(savedHospital);
+  assert.equal(savedHospital.executionType, "ai_assist");
+  assert.equal(savedHospital.aiAssist.suggestedActions.length, 3);
+
+  const generatedQuestions = await generateArrangementAIAssistContent(
+    {
+      currentUserId: "demo",
+      currentUserName: "庄骏",
+      arrangement: savedHospital,
+      action: savedHospital.aiAssist.suggestedActions[1],
+      timezone: "Asia/Shanghai",
+      now: "2026-05-18T12:31:00+08:00",
+    },
+    {
+      callJSON: async (request) => {
+        assert.equal(request.thinkingMode, undefined);
+        assert.ok(request.maxTokens >= 2000);
+        return {
+          ok: true,
+          data: assistGenerationRaw({
+            title: "就诊问题清单",
+            content: "1. 头晕从什么时候开始？\n2. 是否需要复查既往报告？",
+            outputType: "draft",
+            requiresUserConfirmation: true,
+            safetyNote: "这只是就诊准备材料，不构成诊断或治疗建议。",
+            risks: ["medical_requires_confirmation"],
+          }),
+        };
+      },
+    }
+  );
+  assert.equal(generatedQuestions.ok, true);
+  const savedGenerated = addArrangementAIAssistGeneratedResult(
+    savedHospital.id,
+    savedHospital.aiAssist.suggestedActions[1],
+    generatedQuestions.data
+  );
+  assert.ok(savedGenerated);
+  assert.equal(savedGenerated.status, "pending");
+  assert.equal(savedGenerated.sourceMessageIds.length, 0);
+  assert.equal(savedGenerated.aiAssist.generatedResults.length, 1);
+  assert.match(savedGenerated.aiAssist.generatedResults[0].content, /头晕/);
+
+  const planArrangement = {
+    ...savedGenerated,
+    id: "arrangement-plan-1",
+    title: "周五前发方案",
+    note: "需要给客户一个产品方案。",
+    items: ["方案"],
+  };
+  const planSuggestion = await analyzeArrangementAIAssist(
+    {
+      currentUserId: "demo",
+      currentUserName: "庄骏",
+      arrangement: planArrangement,
+      timezone: "Asia/Shanghai",
+      now: "2026-05-18T12:32:00+08:00",
+    },
+    {
+      callJSON: async () => ({
+        ok: true,
+        data: assistSuggestionRaw({
+          suggestedActions: [
+            {
+              actionId: "draft_outline",
+              title: "生成方案大纲",
+              description: "先生成方案结构",
+              riskLevel: "low",
+              requiresUserConfirmation: false,
+              outputType: "steps",
+            },
+            {
+              actionId: "write_first_draft",
+              title: "写初稿",
+              description: "生成方案初稿",
+              riskLevel: "medium",
+              requiresUserConfirmation: true,
+              outputType: "draft",
+            },
+            {
+              actionId: "draft_send_message",
+              title: "生成发送消息草稿",
+              description: "生成可复制给客户的发送文案",
+              riskLevel: "medium",
+              requiresUserConfirmation: false,
+              outputType: "draft",
+            },
+          ],
+        }),
+      }),
+    }
+  );
+  assert.equal(planSuggestion.data.executionType, "ai_assist");
+  assert.deepEqual(
+    planSuggestion.data.suggestedActions.map((action) => action.actionId),
+    ["draft_outline", "write_first_draft", "draft_send_message"]
+  );
+  assert.equal(
+    planSuggestion.data.suggestedActions.find(
+      (action) => action.actionId === "draft_send_message"
+    ).requiresUserConfirmation,
+    true
+  );
+
+  const commuteSuggestion = await analyzeArrangementAIAssist(
+    {
+      currentUserId: "demo",
+      currentUserName: "庄骏",
+      arrangement: {
+        ...savedGenerated,
+        id: "arrangement-commute-1",
+        title: "明天去公司",
+        note: "",
+        items: [],
+      },
+      timezone: "Asia/Shanghai",
+      now: "2026-05-18T12:33:00+08:00",
+    },
+    {
+      callJSON: async () => ({
+        ok: true,
+        data: assistSuggestionRaw({
+          executionType: "user_only",
+          confidence: 0.68,
+          suggestedActions: [],
+          reason: "普通到公司安排，没有明确可由 AI 生成的准备内容。",
+        }),
+      }),
+    }
+  );
+  assert.equal(commuteSuggestion.data.executionType, "user_only");
+  assert.equal(commuteSuggestion.data.suggestedActions.length, 0);
+
+  const stored = getInitialArrangements().find(
+    (arrangement) => arrangement.id === savedGenerated.id
+  );
+  assert.ok(stored);
+  assert.equal(stored.aiAssist.generatedResults.length, 1);
+}
+
 function createPrivateCommitmentInput(messages) {
   return {
     currentUserId: "demo",
@@ -1138,6 +1882,86 @@ function createPrivateMergeInput(candidateArrangement, messages) {
     candidateArrangements: [candidateArrangement],
     timezone: "Asia/Shanghai",
     now: "2026-05-17T09:04:00+08:00",
+  };
+}
+
+function createGroupRelatedInput(messages) {
+  const memberSummaries = [
+    {
+      id: "demo",
+      name: "庄骏",
+      nicknames: ["庄骏", "骏", "小骏"],
+    },
+    {
+      id: "identity-xiaowang",
+      name: "小王",
+      nicknames: ["王"],
+    },
+    {
+      id: "identity-zhangsan",
+      name: "张三",
+      nicknames: ["张三"],
+    },
+    {
+      id: "identity-lisi",
+      name: "李四",
+      nicknames: ["李四"],
+    },
+  ];
+  const currentUserAliases = ["庄骏", "骏", "小骏", "我"];
+
+  return {
+    currentUserId: "demo",
+    currentUserName: "庄骏",
+    currentUserAliases,
+    groupId: "group-work",
+    groupName: "工作群",
+    memberSummaries,
+    messages,
+    mentions: buildGroupChatMentionInfo(
+      messages,
+      "demo",
+      currentUserAliases,
+      memberSummaries
+    ),
+    existingArrangements: [],
+    timezone: "Asia/Shanghai",
+    now: "2026-05-18T09:15:00+08:00",
+  };
+}
+
+function groupRelatedRaw(overrides = {}) {
+  const { arrangement: arrangementOverrides = {}, ...resultOverrides } = overrides;
+  return {
+    hasArrangement: true,
+    isRelatedToCurrentUser: true,
+    relationReason: "mentioned",
+    hasUserCommitted: false,
+    shouldCreate: true,
+    confidence: 0.86,
+    arrangement: {
+      title: "",
+      summary: "",
+      type: "commitment",
+      status: "pending",
+      timeType: "none",
+      fuzzyTimeLabel: "",
+      startTime: null,
+      endTime: null,
+      dueTime: null,
+      location: "",
+      relatedPeople: [],
+      executor: "current_user",
+      beneficiary: "",
+      items: [],
+      sourceType: "group_chat",
+      sourceMessageIds: [],
+      ...arrangementOverrides,
+    },
+    needsUserConfirmation: false,
+    reason: "群聊上下文中出现了与当前用户明确相关的安排。",
+    risks: [],
+    ...resultOverrides,
   };
 }
 
@@ -1204,7 +2028,64 @@ function similarMergeRaw(overrides) {
   };
 }
 
+function statusChangeRaw(overrides) {
+  return {
+    hasStatusChange: true,
+    relatedArrangementId: "",
+    confidence: 0.88,
+    statusChangeType: "completed",
+    newStatus: "completed",
+    progressNote: "",
+    newTime: null,
+    sourceMessageIds: [],
+    needsUserConfirmation: false,
+    reason: "新消息说明已有安排状态发生变化。",
+    ...overrides,
+  };
+}
+
+function assistSuggestionRaw(overrides = {}) {
+  return {
+    executionType: "ai_assist",
+    confidence: 0.86,
+    suggestedActions: [
+      {
+        actionId: "prepare_checklist",
+        title: "生成准备清单",
+        description: "根据安排内容生成一份准备清单",
+        riskLevel: "low",
+        requiresUserConfirmation: true,
+        outputType: "checklist",
+      },
+    ],
+    reason: "这条安排可以由 AI 生成辅助材料。",
+    risks: [],
+    ...overrides,
+  };
+}
+
+function assistGenerationRaw(overrides = {}) {
+  return {
+    title: "AI 生成内容",
+    content: "可编辑内容",
+    outputType: "draft",
+    requiresUserConfirmation: true,
+    safetyNote: "",
+    reason: "用户点击建议动作后生成。",
+    risks: [],
+    ...overrides,
+  };
+}
+
 async function runArrangementBackfillCase() {
+  installWindowStorageStub();
+  window.localStorage.setItem(
+    "arkme-demo.candidateProfile",
+    JSON.stringify({
+      name: "庄骏",
+      avatarLabel: "骏",
+    })
+  );
   window.localStorage.setItem(
     "arkme-demo.selfRecords",
     JSON.stringify([
@@ -1265,6 +2146,15 @@ async function runArrangementBackfillCase() {
         sentAt: Date.now() - 600,
         sender: "identity",
       },
+      {
+        id: "group-history-2",
+        conversationId: "group-work",
+        conversationType: "group",
+        identityId: "identity-xiaowang",
+        text: "@庄骏 明天带资料",
+        sentAt: Date.now() - 500,
+        sender: "identity",
+      },
     ])
   );
 
@@ -1279,8 +2169,8 @@ async function runArrangementBackfillCase() {
     conversationKind: "group_chat",
     conversationId: "all",
   });
-  assert.equal(groupTargets.length, 1);
-  assert.equal(groupTargets[0].scene, "group_chat");
+  assert.equal(groupTargets.length, 2);
+  assert.ok(groupTargets.every((target) => target.scene === "group_chat"));
 
   const conversationOptions = getArrangementBackfillConversationOptions();
   assert.ok(conversationOptions.some((option) => option.kind === "self_chat"));
@@ -1316,6 +2206,26 @@ async function runArrangementBackfillCase() {
           items: [input.messages[0].content],
         }),
       }),
+      analyzeGroup: async (input) => {
+        const sourceMessage = input.messages.at(-1);
+        return {
+          ok: true,
+          data: groupRelatedRaw({
+            relationReason: "mentioned",
+            arrangement: {
+              title: "明天带资料",
+              summary: "群聊中小王 @ 当前用户，要求当前用户明天带资料。",
+              type: "commitment",
+              timeType: "fuzzy",
+              fuzzyTimeLabel: "明天",
+              executor: "current_user",
+              relatedPeople: ["小王", "庄骏"],
+              items: ["资料"],
+              sourceMessageIds: sourceMessage ? [sourceMessage.id] : [],
+            },
+          }),
+        };
+      },
     }
   );
 

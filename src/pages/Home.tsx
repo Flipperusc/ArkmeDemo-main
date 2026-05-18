@@ -33,6 +33,7 @@ import {
 } from "@/data/arrangementMergeRecords";
 import {
   createArrangementFromAICandidate,
+  applyArrangementStatusChange,
   getInitialArrangements,
   hasArrangementForSourceMessage,
   mergeArrangementSupplement,
@@ -70,6 +71,16 @@ import {
   selectSimilarArrangementMergeCandidates,
 } from "@/services/arrangementSimilarityMergeService";
 import {
+  analyzeArrangementStatusChange,
+  selectArrangementStatusChangeCandidates,
+} from "@/services/arrangementStatusChangeService";
+import {
+  analyzeGroupChatRelatedArrangement,
+  buildGroupChatMentionInfo,
+  convertGroupRelatedArrangementToCandidate,
+  shouldConsiderGroupChatRelatedArrangement,
+} from "@/services/groupChatRelatedArrangementAIService";
+import {
   analyzePrivateChatCommitment,
   convertPrivateCommitmentToArrangementCandidate,
 } from "@/services/privateChatCommitmentAIService";
@@ -94,7 +105,9 @@ import type {
   ArrangementAIMessage,
   ArrangementAIMergeCandidateResult,
   ArrangementCandidateResult,
+  GroupChatRelatedArrangementResult,
   ArrangementSimilarityMergeResult,
+  ArrangementStatusChangeResult,
   PrivateChatSupplementMergeResult,
   PrivateChatCommitmentResult,
 } from "@/types/arrangementAI";
@@ -807,8 +820,13 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       )
     );
 
+    const activeScene =
+      activeTestConversationSummary.conversationType === "group"
+        ? "group_chat"
+        : "private_chat";
+
     return pendingArrangementCandidates.filter((candidate) => {
-      if (candidate.scene !== "private_chat") return false;
+      if (candidate.scene !== activeScene) return false;
       if (messageIds.has(candidate.sourceMessageId)) return true;
       return (candidate.sourceMessageIds ?? candidate.result.arrangement.sourceMessageIds).some(
         (sourceMessageId) => messageIds.has(sourceMessageId)
@@ -900,6 +918,112 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       );
     };
   }, [refreshPendingArrangementCandidates]);
+
+  const tryUpdateArrangementStatusFromMessage = React.useCallback(
+    async ({
+      sourceType,
+      sourceLabel,
+      sourceMessageId,
+      sourceText,
+      sourceMessages,
+    }: {
+      sourceType: "self_chat" | "private_chat";
+      sourceLabel: string;
+      sourceMessageId: string;
+      sourceText: string;
+      sourceMessages: ArrangementAIMessage[];
+    }) => {
+      try {
+        if (!sourceText.trim()) return false;
+        if (
+          hasArrangementForSourceMessage(sourceMessageId) ||
+          hasProcessedArrangementMergeMessage(sourceMessageId)
+        ) {
+          return true;
+        }
+
+        const settings = await getAISettings();
+        if (!settings.enableAI || !settings.hasApiKey) return false;
+
+        const arrangements = getInitialArrangements();
+        const candidateArrangements = selectArrangementStatusChangeCandidates({
+          arrangements,
+          sourceType,
+          sourceLabel,
+          sourceText,
+          now: Date.now(),
+        });
+        if (candidateArrangements.length === 0) return false;
+
+        const detectedAt = Date.now();
+        const result = await analyzeArrangementStatusChange({
+          currentUserId: sourceType === "self_chat" ? "self" : demoSenderIdentityId,
+          currentUserName: candidateProfile?.name || "我",
+          sourceType,
+          sourceLabel,
+          sourceMessageId,
+          sourceText,
+          sourceMessages,
+          candidateArrangements,
+          timezone: getRuntimeTimezone(),
+          now: new Date(detectedAt).toISOString(),
+        });
+        if (!result.ok) return false;
+
+        const statusResult = result.data;
+        if (!statusResult.hasStatusChange || statusResult.confidence < 0.5) {
+          return false;
+        }
+
+        const statusSource = buildStatusChangeSource({
+          result: statusResult,
+          sourceMessageId,
+          sourceText,
+          sourceMessages,
+          detectedAt,
+        });
+        const candidate = saveArrangementAIMergeCandidate({
+          sourceMessageId,
+          sourceMessageIds: statusSource.sourceMessageIds,
+          sourceText: statusSource.sourceText,
+          sourceLabel,
+          sourceMessages: statusSource.sourceMessages,
+          targetArrangementId: statusResult.relatedArrangementId,
+          detectedAt,
+          confidence: statusResult.confidence,
+          result: statusResult,
+          status: "pending",
+        });
+
+        if (shouldAutoApplyStatusChange(statusResult)) {
+          const arrangement = applyArrangementStatusChange({
+            targetArrangementId: statusResult.relatedArrangementId,
+            statusChangeType: statusResult.statusChangeType,
+            newStatus: statusResult.newStatus,
+            progressNote: statusResult.progressNote || sourceText,
+            newTime: statusResult.newTime,
+            sourceMessageId,
+            sourceMessageIds: statusSource.sourceMessageIds,
+            sourceText: statusSource.sourceText,
+            sourceMessages: statusSource.sourceMessages,
+            detectedAt,
+            confidence: statusResult.confidence,
+            reason: statusResult.reason,
+          });
+
+          if (arrangement) {
+            updateArrangementAIMergeCandidateStatus(candidate.id, "auto_merged");
+            refreshPendingArrangementCandidates();
+          }
+        }
+
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [candidateProfile?.name, refreshPendingArrangementCandidates]
+  );
 
   const tryMergeSimilarArrangement = React.useCallback(
     async ({
@@ -1023,6 +1147,23 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         if (!settings.enableAI || !settings.hasApiKey) return;
 
         const detectedAt = Date.now();
+        const handledByStatusChange = await tryUpdateArrangementStatusFromMessage({
+          sourceType: "self_chat",
+          sourceLabel: t("sendToSelf.title"),
+          sourceMessageId: record.uid,
+          sourceText: content,
+          sourceMessages: [
+            {
+              id: record.uid,
+              senderId: "self",
+              senderName: candidateProfile?.name,
+              content,
+              createdAt: new Date(record.send_at).toISOString(),
+            },
+          ],
+        });
+        if (handledByStatusChange) return;
+
         const result = await analyzeArrangementCandidate({
           scene: "self_chat",
           currentUserId: "self",
@@ -1104,7 +1245,12 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         // Self-chat sending must not be interrupted by AI recognition.
       }
     },
-    [candidateProfile?.name, t, tryMergeSimilarArrangement]
+    [
+      candidateProfile?.name,
+      t,
+      tryMergeSimilarArrangement,
+      tryUpdateArrangementStatusFromMessage,
+    ]
   );
 
   const triggerPrivateSupplementMergeDetection = React.useCallback(
@@ -1260,6 +1406,15 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         const currentMessage = inputMessages.find((item) => item.id === message.id);
         if (!currentMessage) return false;
 
+        const handledByStatusChange = await tryUpdateArrangementStatusFromMessage({
+          sourceType: "private_chat",
+          sourceLabel: `和 ${otherUserName} 的私聊`,
+          sourceMessageId: message.id,
+          sourceText: content,
+          sourceMessages: inputMessages,
+        });
+        if (handledByStatusChange) return true;
+
         return tryMergeSimilarArrangement({
           sourceType: "private_chat",
           sourceLabel: `和 ${otherUserName} 的私聊`,
@@ -1272,7 +1427,12 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         return false;
       }
     },
-    [candidateProfile?.name, testIdentities, tryMergeSimilarArrangement]
+    [
+      candidateProfile?.name,
+      testIdentities,
+      tryMergeSimilarArrangement,
+      tryUpdateArrangementStatusFromMessage,
+    ]
   );
 
   const triggerPrivateCommitmentDetection = React.useCallback(
@@ -1418,6 +1578,157 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     [candidateProfile?.name, testIdentities, triggerPrivateSimilarityMergeDetection]
   );
 
+  const triggerGroupRelatedArrangementDetection = React.useCallback(
+    async (
+      summary: TestConversationSummary,
+      message: TestMessage,
+      allMessages: TestMessage[]
+    ) => {
+      try {
+        if (summary.conversationType !== "group") return;
+        const content = message.text.trim();
+        if (!content) return;
+        if (
+          hasArrangementForSourceMessage(message.id) ||
+          hasProcessedArrangementAIMessage(message.id, "group_chat")
+        ) {
+          return;
+        }
+
+        const settings = await getAISettings();
+        if (!settings.enableAI || !settings.hasApiKey) return;
+
+        const detectedAt = Date.now();
+        const selfName = candidateProfile?.name || "我";
+        const currentUserAliases = buildCurrentUserAliases(selfName);
+        const contextMessages = getGroupContextMessages(
+          allMessages,
+          summary.conversationId,
+          20
+        );
+        if (contextMessages.length === 0) return;
+
+        const memberSummaries = buildGroupMemberSummaries(
+          summary,
+          selfName,
+          currentUserAliases
+        );
+        const inputMessages = buildGroupAIInputMessages(
+          contextMessages,
+          selfName,
+          testIdentities
+        );
+        if (
+          !shouldConsiderGroupChatRelatedArrangement({
+            messages: inputMessages,
+            currentMessageId: message.id,
+            currentUserId: demoSenderIdentityId,
+            currentUserAliases,
+          })
+        ) {
+          return;
+        }
+
+        const mentions = buildGroupChatMentionInfo(
+          inputMessages,
+          demoSenderIdentityId,
+          currentUserAliases,
+          memberSummaries
+        );
+        const result = await analyzeGroupChatRelatedArrangement({
+          currentUserId: demoSenderIdentityId,
+          currentUserName: selfName,
+          currentUserAliases,
+          groupId: summary.group?.id || summary.conversationId,
+          groupName: summary.group?.name || summary.title,
+          messages: inputMessages,
+          memberSummaries,
+          mentions,
+          existingArrangements: getInitialArrangements().filter(
+            (arrangement) => arrangement.status === "pending"
+          ),
+          timezone: getRuntimeTimezone(),
+          now: new Date(detectedAt).toISOString(),
+        });
+
+        if (!result.ok) return;
+
+        const groupResult = result.data;
+        const candidateResult = convertGroupRelatedArrangementToCandidate(groupResult);
+        const source = buildGroupRelatedArrangementSource({
+          result: groupResult,
+          candidateResult,
+          currentMessage: message,
+          contextMessages,
+          selfName,
+          summary,
+          testIdentities,
+        });
+        const shouldTrack =
+          groupResult.hasArrangement &&
+          groupResult.isRelatedToCurrentUser &&
+          groupResult.relationReason !== "not_related" &&
+          groupResult.confidence >= 0.5;
+
+        if (!shouldTrack) {
+          saveArrangementAICandidate({
+            scene: "group_chat",
+            sourceMessageId: message.id,
+            sourceMessageIds: source.sourceMessageIds,
+            sourceText: source.sourceText,
+            sourceLabel: source.sourceLabel,
+            sourceMessages: source.sourceMessages,
+            executorLabel: source.executorLabel,
+            beneficiaryLabel: source.beneficiaryLabel,
+            relationReason: groupResult.relationReason,
+            detectedAt,
+            confidence: groupResult.confidence,
+            result: candidateResult,
+            status: "ignored",
+          });
+          return;
+        }
+
+        const candidate = saveArrangementAICandidate({
+          scene: "group_chat",
+          sourceMessageId: message.id,
+          sourceMessageIds: source.sourceMessageIds,
+          sourceText: source.sourceText,
+          sourceLabel: source.sourceLabel,
+          sourceMessages: source.sourceMessages,
+          executorLabel: source.executorLabel,
+          beneficiaryLabel: source.beneficiaryLabel,
+          relationReason: groupResult.relationReason,
+          detectedAt,
+          confidence: groupResult.confidence,
+          result: candidateResult,
+          status: "pending",
+        });
+
+        if (groupResult.shouldCreate && groupResult.confidence >= 0.8) {
+          const arrangement = createArrangementFromAICandidate(candidateResult, {
+            ...buildArrangementAISourceFromCandidate(candidate),
+            sourceMessageId: candidate.sourceMessageId,
+            sourceText: candidate.sourceText,
+            detectedAt,
+            confidence: groupResult.confidence,
+            candidateId: candidate.id,
+            feedbackStatus: "auto_created",
+            relationReason: groupResult.relationReason,
+          });
+
+          if (arrangement) {
+            updateArrangementAICandidateStatus(candidate.id, "auto_created", arrangement.id);
+            recordArrangementCandidateFeedback(candidate, "auto_created", arrangement.id);
+          }
+        }
+      } catch {
+        // Group chat sending and receiving must not be interrupted by AI recognition.
+      }
+    },
+    [candidateProfile?.name, testIdentities]
+  );
+
   const createSelfRecord = React.useCallback(
     (content: string) => {
       const timestamp = Date.now();
@@ -1485,6 +1796,30 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
 
   const commitArrangementMergeCandidate = React.useCallback(
     (candidate: ArrangementAIMergeCandidateRecord) => {
+      if (isArrangementStatusChangeResult(candidate.result)) {
+        const arrangement = applyArrangementStatusChange({
+          targetArrangementId: candidate.targetArrangementId,
+          statusChangeType: candidate.result.statusChangeType,
+          newStatus: candidate.result.newStatus,
+          progressNote: candidate.result.progressNote || candidate.sourceText,
+          newTime: candidate.result.newTime,
+          sourceMessageId: candidate.sourceMessageId,
+          sourceMessageIds: candidate.sourceMessageIds,
+          sourceText: candidate.sourceText,
+          sourceMessages: candidate.sourceMessages,
+          detectedAt: candidate.detectedAt,
+          confidence: candidate.confidence,
+          reason: candidate.result.reason,
+        });
+
+        updateArrangementAIMergeCandidateStatus(
+          candidate.id,
+          arrangement ? "confirmed" : "ignored"
+        );
+        refreshPendingArrangementCandidates();
+        return;
+      }
+
       const mergeData = getArrangementMergeCandidateData(candidate.result);
       const arrangement = mergeArrangementSupplement({
         targetArrangementId: candidate.targetArrangementId,
@@ -1731,6 +2066,8 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       );
       if (summary?.conversationType === "private") {
         void triggerPrivateSimilarityMergeDetection(summary, message, testMessages);
+      } else if (summary?.conversationType === "group") {
+        void triggerGroupRelatedArrangementDetection(summary, message, testMessages);
       }
     });
 
@@ -1756,6 +2093,7 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
     showTestConversation,
     testConversationSummaries,
     testMessages,
+    triggerGroupRelatedArrangementDetection,
     triggerPrivateSimilarityMergeDetection,
   ]);
 
@@ -1788,11 +2126,35 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
       setTestConversationTargetUid(`test-${reply.id}`);
 
       void (async () => {
-        const handledByMerge = await triggerPrivateSupplementMergeDetection(
-          summary,
-          reply,
-          nextMessages
-        );
+        let handledByStatusChange = false;
+        if (summary.conversationType === "private") {
+          const otherUserName = summary.identity?.name || summary.title;
+          const contextMessages = getPrivateContextMessages(
+            nextMessages,
+            summary.conversationId,
+            privateChatSupplementMergeContextLimit
+          );
+          const inputMessages = buildPrivateAIInputMessages(
+            contextMessages.length > 0 ? contextMessages : [reply],
+            candidateProfile?.name || "我",
+            otherUserName,
+            testIdentities
+          );
+          handledByStatusChange = await tryUpdateArrangementStatusFromMessage({
+            sourceType: "private_chat",
+            sourceLabel: `和 ${otherUserName} 的私聊`,
+            sourceMessageId: reply.id,
+            sourceText: content,
+            sourceMessages: inputMessages,
+          });
+        } else if (summary.conversationType === "group") {
+          await triggerGroupRelatedArrangementDetection(summary, reply, nextMessages);
+          return;
+        }
+
+        const handledByMerge = handledByStatusChange
+          ? true
+          : await triggerPrivateSupplementMergeDetection(summary, reply, nextMessages);
         const handledBySimilarMerge = handledByMerge
           ? true
           : await triggerPrivateSimilarityMergeDetection(summary, reply, nextMessages);
@@ -1801,12 +2163,16 @@ export default function Home({ currentPage, onNavigate }: HomeProps) {
         }
       })();
     },
-    [
-      markTestConversationAsRead,
-      testMessages,
-      triggerPrivateCommitmentDetection,
+      [
+        markTestConversationAsRead,
+        candidateProfile?.name,
+        testIdentities,
+        testMessages,
+        triggerGroupRelatedArrangementDetection,
+        triggerPrivateCommitmentDetection,
       triggerPrivateSimilarityMergeDetection,
       triggerPrivateSupplementMergeDetection,
+      tryUpdateArrangementStatusFromMessage,
     ]
   );
 
@@ -3357,19 +3723,29 @@ function ArrangementMergeCandidateCard({
 }) {
   const { t } = usePreferences();
   const confidenceLabel = `${Math.round(candidate.confidence * 100)}%`;
+  const statusData = isArrangementStatusChangeResult(candidate.result)
+    ? getArrangementStatusChangeCandidateData(candidate.result, t)
+    : null;
   const mergeData = getArrangementMergeCandidateData(candidate.result);
-  const title = mergeData.newTitle || mergeData.progressNote || candidate.sourceText;
-  const detail =
-    mergeData.addedItems.length > 0
+  const title =
+    statusData?.title ||
+    mergeData.newTitle ||
+    mergeData.progressNote ||
+    candidate.sourceText;
+  const detail = statusData
+    ? statusData.detail
+    : mergeData.addedItems.length > 0
       ? mergeData.addedItems.join("、")
       : mergeData.progressNote || t("arrangementAI.mergeContextOnly");
 
   return (
     <section className="rounded-[16px] border border-[var(--record-card-border)] bg-surface px-3 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
       <p className="text-[13px] font-semibold leading-5 text-text">
-        {"mergeAction" in candidate.result
-          ? t("arrangementAI.similarMergeConfirmTitle")
-          : t("arrangementAI.mergeConfirmTitle")}
+        {statusData
+          ? statusData?.confirmTitle
+          : "mergeAction" in candidate.result
+            ? t("arrangementAI.similarMergeConfirmTitle")
+            : t("arrangementAI.mergeConfirmTitle")}
       </p>
       <p className="mt-1 break-words text-[14px] leading-5 text-text">
         {title}
@@ -3386,7 +3762,9 @@ function ArrangementMergeCandidateCard({
           className="rounded-full bg-primary px-3 py-2 text-[12px] font-medium text-on-primary"
           onClick={onConfirm}
         >
-          {t("arrangementAI.mergeConfirm")}
+          {statusData
+            ? t("arrangementAI.statusChangeConfirm")
+            : t("arrangementAI.mergeConfirm")}
         </button>
         <button
           type="button"
@@ -3579,7 +3957,11 @@ function TestIdentityConversationChat({
             <SelfArrangementCandidateCard
               key={candidate.id}
               candidate={candidate}
-              confirmTitle={t("arrangementAI.privateConfirmTitle")}
+              confirmTitle={
+                summary.conversationType === "group"
+                  ? t("arrangementAI.groupConfirmTitle")
+                  : t("arrangementAI.privateConfirmTitle")
+              }
               onConfirm={() => onConfirmArrangementCandidate(candidate)}
               onEdit={(draft) => onEditArrangementCandidate(candidate, draft)}
               onIgnore={() => onIgnoreArrangementCandidate(candidate)}
@@ -4605,6 +4987,68 @@ function getPrivateContextMessages(
     .slice(-limit);
 }
 
+function getGroupContextMessages(
+  messages: TestMessage[],
+  conversationId: string,
+  limit: number
+) {
+  return messages
+    .filter(
+      (message) =>
+        message.conversationId === conversationId &&
+        message.conversationType === "group"
+    )
+    .sort((a, b) => a.sentAt - b.sentAt)
+    .slice(-limit);
+}
+
+function buildCurrentUserAliases(selfName: string) {
+  const aliases = [selfName, "我", "我这边"];
+  const characters = Array.from(selfName.trim());
+  const lastCharacter = characters.at(-1);
+  if (lastCharacter && lastCharacter !== selfName) {
+    aliases.push(lastCharacter, `小${lastCharacter}`);
+  }
+  return uniqueTextValues(aliases);
+}
+
+function buildGroupMemberSummaries(
+  summary: TestConversationSummary,
+  selfName: string,
+  currentUserAliases: string[]
+) {
+  return [
+    {
+      id: demoSenderIdentityId,
+      name: selfName,
+      nicknames: currentUserAliases,
+    },
+    ...summary.memberIdentities.map((identity) => ({
+      id: identity.id,
+      name: identity.name,
+      nicknames: [identity.avatarLabel],
+    })),
+  ];
+}
+
+function buildGroupAIInputMessages(
+  contextMessages: TestMessage[],
+  selfName: string,
+  testIdentities: TestIdentity[]
+) {
+  return contextMessages.map((message) => ({
+    id: message.id,
+    senderId: message.sender === "demo" ? demoSenderIdentityId : message.identityId,
+    senderName:
+      message.sender === "demo"
+        ? selfName
+        : testIdentities.find((identity) => identity.id === message.identityId)?.name ||
+          "群成员",
+    content: message.text,
+    createdAt: new Date(message.sentAt).toISOString(),
+  }));
+}
+
 function getPrivateSupplementMergeCandidates(
   summary: TestConversationSummary,
   contextMessages: TestMessage[],
@@ -4758,7 +5202,71 @@ function buildSimilarityMergeSource({
   };
 }
 
+function buildStatusChangeSource({
+  result,
+  sourceMessageId,
+  sourceText,
+  sourceMessages,
+  detectedAt,
+}: {
+  result: ArrangementStatusChangeResult;
+  sourceMessageId: string;
+  sourceText: string;
+  sourceMessages: ArrangementAIMessage[];
+  detectedAt: number;
+}) {
+  const modelSourceIds = new Set([...result.sourceMessageIds, sourceMessageId]);
+  const role: ArrangementAIMergeSourceMessage["role"] =
+    result.statusChangeType === "in_progress" ||
+    result.statusChangeType === "progress_update"
+      ? "progress"
+      : "status_change";
+  const normalizedSourceMessages = sourceMessages
+    .filter((message) => modelSourceIds.has(message.id))
+    .map((message): ArrangementAIMergeSourceMessage => ({
+      id: message.id,
+      role,
+      senderName: message.senderName,
+      content: message.content,
+      createdAt: new Date(message.createdAt).getTime(),
+    }));
+  const sourceMessageIds = uniqueTextValues([
+    ...Array.from(modelSourceIds),
+    ...normalizedSourceMessages.map((message) => message.id),
+  ]);
+  const fallbackSourceMessages: ArrangementAIMergeSourceMessage[] = [
+    {
+      id: sourceMessageId,
+      role,
+      content: sourceText,
+      createdAt: detectedAt,
+    },
+  ];
+
+  return {
+    sourceMessageIds,
+    sourceText:
+      normalizedSourceMessages.map(formatMergeSourceMessage).join("\n") ||
+      sourceText,
+    sourceMessages:
+      normalizedSourceMessages.length > 0
+        ? normalizedSourceMessages
+        : fallbackSourceMessages,
+  };
+}
+
 function getArrangementMergeCandidateData(result: ArrangementAIMergeCandidateResult) {
+  if (isArrangementStatusChangeResult(result)) {
+    return {
+      mergeType: "add_context" as const,
+      addedItems: [],
+      progressNote: "",
+      updatedFields: {},
+      newTitle: "",
+      reason: result.reason,
+    };
+  }
+
   if ("mergeAction" in result) {
     return {
       mergeType: result.mergeAction,
@@ -4777,6 +5285,60 @@ function getArrangementMergeCandidateData(result: ArrangementAIMergeCandidateRes
     updatedFields: result.updatedFields,
     newTitle: result.newTitle,
     reason: result.reason,
+  };
+}
+
+function isArrangementStatusChangeResult(
+  result: ArrangementAIMergeCandidateResult
+): result is ArrangementStatusChangeResult {
+  return "hasStatusChange" in result;
+}
+
+function shouldAutoApplyStatusChange(result: ArrangementStatusChangeResult) {
+  if (!result.hasStatusChange || result.needsUserConfirmation) return false;
+  if (result.statusChangeType === "completed") return result.confidence >= 0.86;
+  if (
+    result.statusChangeType === "in_progress" ||
+    result.statusChangeType === "progress_update"
+  ) {
+    return result.confidence >= 0.8;
+  }
+
+  return false;
+}
+
+function getArrangementStatusChangeCandidateData(
+  result: ArrangementStatusChangeResult,
+  t: ReturnType<typeof usePreferences>["t"]
+) {
+  if (result.statusChangeType === "completed") {
+    return {
+      confirmTitle: t("arrangementAI.statusChangeCompletedTitle"),
+      title: result.progressNote || t("arrangements.status.completed"),
+      detail: result.reason || t("arrangementAI.statusChangeCompletedDetail"),
+    };
+  }
+
+  if (result.statusChangeType === "rescheduled") {
+    return {
+      confirmTitle: t("arrangementAI.statusChangeRescheduledTitle"),
+      title: result.newTime || t("arrangements.mergeUpdateTime"),
+      detail: result.reason || t("arrangementAI.statusChangeRescheduledDetail"),
+    };
+  }
+
+  if (result.statusChangeType === "canceled") {
+    return {
+      confirmTitle: t("arrangementAI.statusChangeCanceledTitle"),
+      title: result.progressNote || t("arrangements.status.canceled"),
+      detail: result.reason || t("arrangementAI.statusChangeCanceledDetail"),
+    };
+  }
+
+  return {
+    confirmTitle: t("arrangementAI.statusChangeProgressTitle"),
+    title: result.progressNote || t("arrangements.progressNotes"),
+    detail: result.reason || t("arrangementAI.statusChangeProgressDetail"),
   };
 }
 
@@ -4842,6 +5404,93 @@ function buildPrivateCommitmentSource({
   };
 }
 
+function buildGroupRelatedArrangementSource({
+  result,
+  candidateResult,
+  currentMessage,
+  contextMessages,
+  selfName,
+  summary,
+  testIdentities,
+}: {
+  result: GroupChatRelatedArrangementResult;
+  candidateResult: ArrangementCandidateResult;
+  currentMessage: TestMessage;
+  contextMessages: TestMessage[];
+  selfName: string;
+  summary: TestConversationSummary;
+  testIdentities: TestIdentity[];
+}) {
+  const modelSourceIds = new Set([
+    ...result.arrangement.sourceMessageIds,
+    ...candidateResult.arrangement.sourceMessageIds,
+    currentMessage.id,
+  ]);
+  const matchedMessages = contextMessages.filter((message) =>
+    modelSourceIds.has(message.id)
+  );
+  const sourceContextMessages =
+    matchedMessages.length > 0 ? matchedMessages : [currentMessage];
+  const requestMessage =
+    sourceContextMessages.find((message) => message.sender !== "demo") ??
+    [...contextMessages]
+      .reverse()
+      .find(
+        (message) =>
+          message.sender !== "demo" && message.sentAt <= currentMessage.sentAt
+      ) ??
+    null;
+  const commitmentMessage =
+    sourceContextMessages.find((message) => message.sender === "demo") ?? null;
+  const sourceMessages = sourceContextMessages.map((message) =>
+    buildCandidateSourceMessage(
+      message,
+      message.sender === "demo" ? "commitment" : "request",
+      getGroupMessageSenderName(message, selfName, testIdentities)
+    )
+  );
+  const sourceMessageIds = uniqueTextValues([
+    ...Array.from(modelSourceIds),
+    ...sourceMessages.map((message) => message.id),
+  ]);
+  const sourceLabel = `群聊：${summary.group?.name || summary.title}`;
+
+  return {
+    sourceMessageIds,
+    sourceText:
+      sourceMessages.map(formatCandidateSourceMessage).join("\n") ||
+      currentMessage.text,
+    sourceLabel,
+    sourceMessages,
+    executorLabel: formatGroupParticipant(
+      result.arrangement.executor,
+      selfName,
+      summary.memberIdentities
+    ),
+    beneficiaryLabel: formatGroupParticipant(
+      result.arrangement.beneficiary,
+      selfName,
+      summary.memberIdentities
+    ),
+    requestMessageId: requestMessage?.id,
+    requestMessageContent: requestMessage
+      ? formatCandidateSourceMessage(
+          buildCandidateSourceMessage(
+            requestMessage,
+            "request",
+            getGroupMessageSenderName(requestMessage, selfName, testIdentities)
+          )
+        )
+      : undefined,
+    commitmentMessageId: commitmentMessage?.id,
+    commitmentMessageContent: commitmentMessage
+      ? formatCandidateSourceMessage(
+          buildCandidateSourceMessage(commitmentMessage, "commitment", selfName)
+        )
+      : undefined,
+  };
+}
+
 function buildArrangementAISourceFromCandidate(candidate: ArrangementAICandidateRecord) {
   const requestMessage = candidate.sourceMessages?.find(
     (message) => message.role === "request"
@@ -4865,6 +5514,7 @@ function buildArrangementAISourceFromCandidate(candidate: ArrangementAICandidate
       : undefined,
     executor: candidate.executorLabel,
     beneficiary: candidate.beneficiaryLabel,
+    relationReason: candidate.relationReason,
   };
 }
 
@@ -4890,6 +5540,27 @@ function formatPrivateParticipant(value: string, selfName: string, otherName: st
   if (value === "current_user") return selfName || "我";
   if (value === "other_user") return otherName;
   return value;
+}
+
+function getGroupMessageSenderName(
+  message: TestMessage,
+  selfName: string,
+  testIdentities: TestIdentity[]
+) {
+  if (message.sender === "demo") return selfName;
+  return testIdentities.find((identity) => identity.id === message.identityId)?.name || "群成员";
+}
+
+function formatGroupParticipant(
+  value: string,
+  selfName: string,
+  memberIdentities: TestIdentity[]
+) {
+  if (value === "current_user") return selfName || "我";
+  const member = memberIdentities.find(
+    (identity) => identity.id === value || identity.name === value
+  );
+  return member?.name || value;
 }
 
 function uniqueTextValues(values: string[]) {

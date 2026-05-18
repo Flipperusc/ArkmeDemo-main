@@ -4,7 +4,9 @@ import {
 } from "@/services/arrangementSimilarityMergePrompt";
 import {
   ARRANGEMENT_SIMILAR_MERGE_JSON_MAX_TOKENS,
+  DEFAULT_THINKING_MODE,
   type AIServiceResult,
+  type AIThinkingMode,
 } from "@/types/ai";
 import type { ArrangementItem } from "@/types/arrangement";
 import type {
@@ -43,6 +45,7 @@ export async function analyzeArrangementSimilarityMerge(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
       jsonExample: unknown;
       maxTokens?: number;
+      thinkingMode?: AIThinkingMode;
     }) => Promise<
       | {
           ok: true;
@@ -71,6 +74,7 @@ export async function analyzeArrangementSimilarityMerge(
   const response = await callJSON<unknown>({
     ...prompt,
     maxTokens: ARRANGEMENT_SIMILAR_MERGE_JSON_MAX_TOKENS,
+    thinkingMode: DEFAULT_THINKING_MODE,
   });
 
   if (!response.ok) {

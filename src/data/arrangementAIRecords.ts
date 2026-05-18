@@ -1,5 +1,8 @@
 import type { ArrangementCandidateResult } from "@/types/arrangementAI";
-import type { ArrangementAIScene } from "@/types/arrangementAI";
+import type {
+  ArrangementAIScene,
+  GroupChatRelationReason,
+} from "@/types/arrangementAI";
 
 export const arrangementAICandidatesStorageKey = "arkme-demo.arrangementAICandidates";
 export const arrangementAIFeedbackStorageKey = "arkme-demo.arrangementAIFeedback";
@@ -31,6 +34,7 @@ export type ArrangementAICandidateRecord = {
   sourceMessages?: ArrangementAICandidateSourceMessage[];
   executorLabel?: string;
   beneficiaryLabel?: string;
+  relationReason?: GroupChatRelationReason;
   detectedAt: number;
   confidence: number;
   result: ArrangementCandidateResult;
@@ -178,6 +182,7 @@ function normalizeCandidate(value: unknown): ArrangementAICandidateRecord | null
   const result = isPlainObject(value.result)
     ? (value.result as ArrangementCandidateResult)
     : null;
+  const relationReason = normalizeRelationReason(value.relationReason);
 
   if (!sourceMessageId || !sourceText || !detectedAt || !result) return null;
 
@@ -201,6 +206,7 @@ function normalizeCandidate(value: unknown): ArrangementAICandidateRecord | null
     ...(normalizeText(value.beneficiaryLabel)
       ? { beneficiaryLabel: normalizeText(value.beneficiaryLabel) }
       : {}),
+    ...(relationReason ? { relationReason } : {}),
     detectedAt,
     confidence,
     result,
@@ -277,6 +283,20 @@ function normalizeFeedbackAction(value: unknown): ArrangementAIFeedbackAction {
   }
 
   return "ignored";
+}
+
+function normalizeRelationReason(value: unknown): GroupChatRelationReason | "" {
+  if (
+    value === "mentioned" ||
+    value === "committed" ||
+    value === "assigned" ||
+    value === "confirmed" ||
+    value === "not_related"
+  ) {
+    return value;
+  }
+
+  return "";
 }
 
 function normalizeCandidateSourceMessages(value: unknown) {

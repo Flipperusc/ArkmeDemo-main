@@ -125,6 +125,48 @@ pnpm codex:init-log -- --name="<候选人姓名>"
 - `pnpm verify:answer` 通过
 - 未执行云端真实上传：当前环境未提供面试上传环境变量
 
+## 2026-05-18 12:21:28 CST (+0800)
+
+### 用户输入
+请对「安排」模块 DeepSeek AI 能力做一次稳定性、成本、隐私和回归测试整理。目标不是增加新功能，而是让 AI 能力更稳定、更可控、更安全。重点检查 DeepSeek 调用安全、成本控制、JSON 稳定性、产品体验、回归测试和代码整理；至少覆盖自聊识别、私聊承诺识别、连续补充合并、相似安排合并、智能完成、群聊相关安排识别、AI 关闭状态、DeepSeek API Key 未配置、DeepSeek 返回空 content、JSON parse 失败；不要重写整个模块，不引入复杂架构，优先小步修复，不改变已验证过的核心交互。
+
+### AI 最终输出
+已完成「安排」模块 DeepSeek AI 能力稳定性、成本、隐私和回归测试整理。
+
+本轮修复了三个具体问题：Vite DeepSeek 代理不再重复硬编码 `DEFAULT_DEEPSEEK_BASE_URL`、`DEFAULT_DEEPSEEK_MODEL`、`DEFAULT_THINKING_MODE` 等默认常量，改为与前端类型层共同复用 `shared/aiDefaults.ts`；相似安排合并和状态识别调用现在显式传入 `thinkingMode: DEFAULT_THINKING_MODE`，不会因为全局设置开启 thinking 而额外消耗推理成本；node tsconfig 的编译产物输出到已忽略的 `.tsbuild/`，避免共享常量引入后在源码目录旁边生成 `.js/.d.ts`。
+
+安全检查结果：API Key 仍只通过设置页临时输入并 POST 到同源代理，前端缓存只保存 `hasApiKey` 和脱敏 `apiKeyPreview`；页面组件没有直接读取或拼接 Authorization；`src` 扫描未发现 API Key/Authorization/console 泄露；网络错误和 DeepSeek 异常继续返回泛化文案，不把上游错误体或密钥信息展示给用户。用户关闭 AI 或未配置 Key 时，`callDeepSeekJSON()` 会在前端服务层早退，不请求 `/api/ai/deepseek/json`。
+
+成本控制检查结果：自聊、私聊承诺、私聊补充、相似合并、状态识别、群聊相关安排都只传必要上下文；相似合并和状态识别先本地筛候选再调用 AI；私聊/群聊都有已处理消息与已有安排去重；所有 JSON 调用都有场景化 maxTokens；DeepSeek JSON 代理统一使用 `response_format: { type: "json_object" }`。
+
+JSON 稳定性检查结果：所有 prompt 文件集中在 `src/services/*Prompt.ts`，都包含 json 指令和 JSON 示例；DeepSeek 空 content、JSON parse 失败、AI 关闭、未配置 Key、字段缺失都会走 fallback/normalize，不影响聊天主流程。回归测试覆盖了自聊识别、私聊承诺、连续补充合并、相似安排合并、智能完成/状态识别、群聊相关安排、AI 关闭、未配置 Key、空 content、JSON parse 失败。
+
+剩余技术债：`Home.tsx` 仍承担较多安排 AI 编排逻辑，后续可以按自聊、私聊、群聊、状态识别拆成更小 hook/service；Vite 代理只是 Demo/本地代理，生产仍需要正式服务端密钥存储和审计；构建仍有单 chunk 超 500 kB 的 Vite 警告，后续可做按路由拆包。
+
+验证已通过：`pnpm lint`、`pnpm build`、`pnpm test:arrangement-ai`、`pnpm verify:answer`。测试入口：移动端 Demo `http://127.0.0.1:5173/`，消息测试后台 `http://127.0.0.1:5173/sendtest`。
+
+### 本轮改动文件
+- vite.config.ts
+- tsconfig.node.json
+- .gitignore
+- shared/aiDefaults.ts
+- src/types/ai.ts
+- src/services/arrangementSimilarityMergeService.ts
+- src/services/arrangementStatusChangeService.ts
+- scripts/test-arrangement-ai.mjs
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `AGENTS.md`、`docs/candidate-rules.md`
+- 已扫描 `src` 下 API Key、Authorization、console 泄露风险，未发现页面层敏感输出
+- `pnpm lint` 通过
+- `pnpm build` 通过
+- `pnpm test:arrangement-ai` 通过
+- `pnpm verify:answer` 通过
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
 ## 2026-05-16 15:06:15 CST (+0800)
 
 ### 用户输入
@@ -361,6 +403,49 @@ JSON 结果校验与 normalize：新增 `src/types/arrangementAI.ts` 定义输�
 ### 验证结果
 - 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
 - 已读取 attention.md
+- `pnpm lint` 通过
+- `pnpm build` 通过
+- `pnpm test:arrangement-ai` 通过
+- `pnpm verify:answer` 通过
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-18 12:08:34 CST (+0800)
+
+### 用户输入
+请继续开发「安排」模块 AI 能力：群聊中与当前用户相关的安排识别。要求使用 deepseek-v4-pro 从最近 10 到 20 条群聊上下文中识别只和当前用户明确相关的安排，只处理当前用户被点名、主动承诺、被分配任务、明确回复确认；不处理别人之间的安排、无明确执行人的讨论、未承诺的请求、全群泛泛提醒。DeepSeek 使用 JSON Output、thinking disabled、不保存 reasoning_content；高置信度自动创建，中置信度待确认，低置信度不创建；详情页展示群聊来源、群名称、相关消息、为什么认为和我有关、执行人/相关人；失败不影响群聊。
+
+### AI 最终输出
+已完成群聊中与当前用户相关的安排识别能力。
+
+相关性判断收敛为 `mentioned`、`committed`、`assigned`、`confirmed` 四类；其他群成员互相安排、泛提醒和模糊讨论都会归为 `not_related`。实时群聊和历史重新识别都会先做本地轻量门控，再把最近最多 20 条群聊、当前用户 id/名称/昵称、群成员简表、@/点名信息、now/timezone 和现有候选安排传给 DeepSeek。
+
+DeepSeek prompt 位于 `src/services/groupChatRelatedArrangementPrompt.ts`，服务与归一化位于 `src/services/groupChatRelatedArrangementAIService.ts`。调用使用 `deepseek-v4-pro` 的 JSON 输出路径，默认 `thinking disabled`，失败时返回忽略结果，不阻塞群聊发送或接收，也不保存 reasoning_content。
+
+自动创建策略已按要求落地：必须同时满足 `hasArrangement=true`、`isRelatedToCurrentUser=true`、`shouldCreate=true`、`executor=current_user` 且 `confidence>=0.8`；0.5 到 0.8 的相关安排进入待确认，确认文案为「群里好像有一件和你有关的安排，要加入吗？」；低置信度和不相关结果只记录为忽略或跳过，不给别人创建安排。
+
+详情页来源区现在支持群聊来源展示：来源为群聊、展示群名称/相关消息、`relationReason` 的本地化说明、执行人/受益人和相关人。验证覆盖了 @我带资料、群里问谁来处理后我回复我来、别人之间互相安排不生成、全群泛提醒不生成、中置信度进入确认，以及历史回填只创建与当前用户相关的群聊安排。
+
+验证已通过：`pnpm lint`、`pnpm build`、`pnpm test:arrangement-ai`、`pnpm verify:answer`。测试入口：移动端 Demo `http://127.0.0.1:5173/`，消息测试后台 `http://127.0.0.1:5173/sendtest`。
+
+### 本轮改动文件
+- src/types/ai.ts
+- src/types/arrangementAI.ts
+- src/types/arrangement.ts
+- src/services/groupChatRelatedArrangementPrompt.ts
+- src/services/groupChatRelatedArrangementAIService.ts
+- src/data/arrangementAIRecords.ts
+- src/data/arrangements.ts
+- src/services/arrangementAIBackfillService.ts
+- src/pages/Home.tsx
+- src/pages/Arrangements.tsx
+- src/settings/preferences.ts
+- scripts/test-arrangement-ai.mjs
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `AGENTS.md`、`docs/candidate-rules.md`
 - `pnpm lint` 通过
 - `pnpm build` 通过
 - `pnpm test:arrangement-ai` 通过
@@ -857,4 +942,127 @@ DeepSeek prompt 在 `src/services/arrangementSimilarityMergePrompt.ts`，输出 
 - `pnpm verify:answer` 通过
 - 已提交并推送 `main`
 - 已创建并推送 `v0.2.3` annotated tag
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+
+## 2026-05-18 11:32:01 CST (+0800)
+
+### 用户输入
+请继续开发「安排」模块 AI 能力：根据后续对话智能判断安排状态。要求使用 deepseek-v4-pro 判断新消息是否对应某条已有安排的 completed、in_progress、canceled、rescheduled、progress_update 或 ignore 状态变化；本地先筛选 pending/later/in_progress 和近期相关候选，最多传 3 到 5 条；高置信度完成可自动更新，进展只写入进展，改期和取消需要确认；详情页记录状态变化来源并支持撤销；DeepSeek 失败时不做状态变更，不删除安排，不做群聊状态更新。
+
+### AI 最终输出
+已完成「安排」模块后续对话状态识别能力。
+
+状态识别 prompt 位于 `src/services/arrangementStatusChangePrompt.ts`，服务与候选筛选位于 `src/services/arrangementStatusChangeService.ts`。本地先判断消息是否有完成、进展、改期或取消信号，再按状态、近期性、标题关键词、时间、相关人、来源上下文打分，最多传 5 条候选给 DeepSeek。
+
+自动更新边界：高置信度 completed 可自动标记完成；in_progress/progress_update 高置信度只写入进展，不直接完成；rescheduled 和 canceled 默认进入确认卡，不静默覆盖时间或取消安排；低置信度和 DeepSeek 失败都不更新。
+
+撤销通过 `ArrangementItem.statusHistory` 保存状态变化快照，`undoLastArrangementStatusChange()` 可恢复最近一次状态变化前的状态、时间、来源上下文和进展记录。详情页展示状态变化记录、来源消息和撤销入口。
+
+验证已通过：`pnpm verify:answer`。测试入口：移动端 Demo `http://127.0.0.1:5173/`。
+
+### 本轮改动文件
+- src/types/arrangement.ts
+- src/types/arrangementAI.ts
+- src/types/ai.ts
+- src/services/arrangementStatusChangePrompt.ts
+- src/services/arrangementStatusChangeService.ts
+- src/data/arrangementMergeRecords.ts
+- src/data/arrangements.ts
+- src/pages/Home.tsx
+- src/pages/Arrangements.tsx
+- src/settings/preferences.ts
+- scripts/test-arrangement-ai.mjs
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `AGENTS.md`、`docs/candidate-rules.md`
+- `pnpm test:arrangement-ai` 通过
+- `pnpm verify:answer` 通过
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+## 2026-05-18 12:51:05 CST (+0800)
+
+### 用户输入
+请继续开发「安排」模块 AI 能力：判断安排是否可以由 AI 协助执行。要求使用 deepseek-v4-pro 判断 executionType（user_only / ai_assist / ai_executable），输出 suggestedActions，在详情页展示「AI 可以帮你」，点击动作后调用 DeepSeek 生成结果并保存到安排详情；不自动发消息、支付、医疗诊断、法律/财务决策或外部动作，相关高风险动作必须用户确认，并通过 lint / typecheck / test。
+
+### AI 最终输出
+已完成「安排」模块 AI 协助执行能力。
+
+`executionType` 由 `src/services/arrangementAIAssistService.ts` 调用 DeepSeek JSON 分类：`user_only` 表示只能用户自己完成，`ai_assist` 表示 AI 可生成清单/草稿/步骤/资料整理/提醒建议，`ai_executable` 表示 AI 可能能直接生成结果但仍必须用户确认。详情页只在 AI 已启用且已配置 Key 时自动分析，分类调用默认 `thinkingMode: disabled`。
+
+`suggestedActions` 由 `src/services/arrangementAIAssistPrompt.ts` 生成并归一化，最多保留 5 个动作。发送消息、通知他人、修改时间、删除安排、医疗、法律、财务相关动作都会强制 `requiresUserConfirmation=true`；医疗类只允许整理症状、问题清单、携带清单和提醒建议，不做诊断。
+
+详情页新增「AI 可以帮你」区域。用户点击建议动作后走 `generateArrangementAIAssistContent()`，只保存最终内容到 `ArrangementItem.aiAssist.generatedResults`，不会自动对外发送、不会自动修改安排、不会替用户承诺。生成内容和安全提示会显示在当前安排详情里。
+
+验证已通过：`pnpm test:arrangement-ai`、`pnpm lint`、`pnpm build`、`pnpm verify:answer`。测试入口：移动端 Demo `http://127.0.0.1:5173/`，消息测试后台 `http://127.0.0.1:5173/sendtest`。
+
+### 本轮改动文件
+- src/types/arrangement.ts
+- src/types/arrangementAI.ts
+- src/types/ai.ts
+- src/services/arrangementAIAssistPrompt.ts
+- src/services/arrangementAIAssistService.ts
+- src/data/arrangements.ts
+- src/pages/Arrangements.tsx
+- src/settings/preferences.ts
+- scripts/test-arrangement-ai.mjs
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+- src/data/aiConversationLog.ts
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `AGENTS.md`、`docs/candidate-rules.md`
+- `pnpm test:arrangement-ai` 通过
+- `pnpm lint` 通过
+- `pnpm build` 通过，仍有既有单 chunk 超 500 kB 的 Vite 警告
+- `pnpm verify:answer` 通过
+- 已确认 `http://127.0.0.1:5173/` 和 `http://127.0.0.1:5173/sendtest` 返回 200
+- 未执行云端真实上传：当前环境未提供面试上传环境变量
+## 2026-05-18 12:55:28 CST (+0800)
+
+### 用户输入
+推送
+版本0.3.0：基本需求构建完毕
+
+### AI 最终输出
+已将 ArkmeDemo-main 当前本地改动提交并推送到 GitHub，并创建/推送 `v0.3.0` annotated tag，版本说明为「版本0.3.0：基本需求构建完毕」。
+
+本次提交包含「安排」模块从基础记录到 DeepSeek AI 识别、私聊承诺、连续补充合并、相似安排归集、状态识别、群聊相关安排识别、AI 协助执行，以及稳定性、成本、隐私和回归测试整理。推送前已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`，并运行完整校验。
+
+测试入口：移动端 Demo `http://127.0.0.1:5173/`，消息测试后台 `http://127.0.0.1:5173/sendtest`。
+
+### 本轮改动文件
+- .gitignore
+- shared/aiDefaults.ts
+- tsconfig.node.json
+- vite.config.ts
+- scripts/test-arrangement-ai.mjs
+- src/data/aiConversationLog.ts
+- src/data/arrangementAIRecords.ts
+- src/data/arrangementMergeRecords.ts
+- src/data/arrangements.ts
+- src/pages/Arrangements.tsx
+- src/pages/Home.tsx
+- src/services/arrangementAIBackfillService.ts
+- src/services/arrangementSimilarityMergeService.ts
+- src/services/arrangementStatusChangePrompt.ts
+- src/services/arrangementStatusChangeService.ts
+- src/services/groupChatRelatedArrangementAIService.ts
+- src/services/groupChatRelatedArrangementPrompt.ts
+- src/services/arrangementAIAssistPrompt.ts
+- src/services/arrangementAIAssistService.ts
+- src/settings/preferences.ts
+- src/types/ai.ts
+- src/types/arrangement.ts
+- src/types/arrangementAI.ts
+- docs/codex-logs/candidate-庄骏-xxxxxxxxxxxxiao-codexsandboxoffline-20260516T061052-039b0027.md
+
+### 验证结果
+- 已确认上一轮记录存在于当前候选人个人日志和 `src/data/aiConversationLog.ts`
+- 已读取 `AGENTS.md`、`docs/candidate-rules.md`
+- 已读取 `github-push-local` 和 `github-tag-version` 技能说明
+- `pnpm verify:answer` 通过
+- 已提交并推送 `main`
+- 已创建并推送 `v0.3.0` annotated tag
 - 未执行云端真实上传：当前环境未提供面试上传环境变量

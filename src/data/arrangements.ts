@@ -1,5 +1,11 @@
 import type {
   ArrangementAIFeedback,
+  ArrangementAIAssistGeneratedResult,
+  ArrangementAIAssistOutputType,
+  ArrangementAIAssistRiskLevel,
+  ArrangementAIAssistState,
+  ArrangementAIAssistSuggestedAction,
+  ArrangementExecutionType,
   ArrangementItem,
   ArrangementMergeHistoryItem,
   ArrangementMergeSnapshot,
@@ -11,10 +17,18 @@ import type {
   ArrangementSourceContext,
   ArrangementSourceType,
   ArrangementStatus,
+  ArrangementStatusHistoryItem,
+  ArrangementStatusChangeSnapshot,
+  ArrangementStatusChangeType,
   ArrangementTimeType,
 } from "@/types/arrangement";
-import type { ArrangementCandidateResult } from "@/types/arrangementAI";
-import type { ArrangementAIScene } from "@/types/arrangementAI";
+import type {
+  ArrangementAIAssistGenerationResult,
+  ArrangementAIAssistSuggestionResult,
+  ArrangementAIScene,
+  ArrangementCandidateResult,
+  GroupChatRelationReason,
+} from "@/types/arrangementAI";
 
 export const arrangementsStorageKey = "arkme-demo.arrangements";
 export const arrangementsStorageEvent = "arkme-demo:arrangements-updated";
@@ -45,6 +59,7 @@ export type ArrangementAICreateSource = {
   commitmentMessageContent?: string;
   executor?: string;
   beneficiary?: string;
+  relationReason?: GroupChatRelationReason;
   detectedAt: number;
   confidence: number;
   candidateId?: string;
@@ -55,7 +70,7 @@ export type ArrangementAICreateSource = {
 
 export type ArrangementAIMergeSourceMessage = {
   id: string;
-  role: "supplement" | "commitment" | "request" | "progress";
+  role: "supplement" | "commitment" | "request" | "progress" | "status_change";
   senderName?: string;
   content: string;
   createdAt?: number;
@@ -72,6 +87,21 @@ export type ArrangementAIMergeSource = {
   progressNote?: string;
   updatedFields: Record<string, unknown>;
   newTitle: string;
+  detectedAt: number;
+  confidence: number;
+  reason: string;
+};
+
+export type ArrangementAIStatusChangeSource = {
+  targetArrangementId: string;
+  statusChangeType: ArrangementStatusChangeType;
+  newStatus: ArrangementStatus;
+  progressNote: string;
+  newTime: string | null;
+  sourceMessageId: string;
+  sourceMessageIds: string[];
+  sourceText: string;
+  sourceMessages: ArrangementAIMergeSourceMessage[];
   detectedAt: number;
   confidence: number;
   reason: string;
@@ -97,6 +127,7 @@ const defaultArrangements: ArrangementItem[] = [
     mergedSourceIds: [],
     relatedContexts: [],
     progressNotes: [],
+    statusHistory: [],
     mergeHistory: [],
     relatedPeople: [],
     reminder: {
@@ -126,6 +157,7 @@ const defaultArrangements: ArrangementItem[] = [
     mergedSourceIds: [],
     relatedContexts: [],
     progressNotes: [],
+    statusHistory: [],
     mergeHistory: [],
     relatedPeople: [
       {
@@ -162,6 +194,7 @@ const defaultArrangements: ArrangementItem[] = [
     mergedSourceIds: [],
     relatedContexts: [],
     progressNotes: [],
+    statusHistory: [],
     mergeHistory: [],
     relatedPeople: [],
     reminder: {
@@ -208,8 +241,10 @@ function normalizeTimestamp(value: unknown): number | null {
 function normalizeStatus(value: unknown): ArrangementStatus {
   if (
     value === "pending" ||
+    value === "in_progress" ||
     value === "completed" ||
     value === "later" ||
+    value === "canceled" ||
     value === "ignored"
   ) {
     return value;
@@ -261,6 +296,7 @@ function normalizeSourceContext(value: unknown): ArrangementSourceContext | unde
       : "manual";
   const messageId = normalizeText(sourceContext.messageId);
   const messageContent = normalizeText(sourceContext.messageContent);
+  const relationReason = normalizeRelationReason(sourceContext.relationReason);
 
   if (!messageId && !messageContent) return undefined;
 
@@ -287,6 +323,7 @@ function normalizeSourceContext(value: unknown): ArrangementSourceContext | unde
     ...(normalizeText(sourceContext.beneficiary)
       ? { beneficiary: normalizeText(sourceContext.beneficiary) }
       : {}),
+    ...(relationReason ? { relationReason } : {}),
     detectedAt: normalizeTimestamp(sourceContext.detectedAt),
     confidence:
       typeof sourceContext.confidence === "number" &&
@@ -318,6 +355,121 @@ function normalizeAIFeedback(value: unknown): ArrangementAIFeedback | undefined 
     status,
     updatedAt: normalizeTimestamp(feedback.updatedAt) ?? Date.now(),
     ...(normalizeText(feedback.note) ? { note: normalizeText(feedback.note) } : {}),
+  };
+}
+
+function normalizeExecutionType(value: unknown): ArrangementExecutionType {
+  if (
+    value === "user_only" ||
+    value === "ai_assist" ||
+    value === "ai_executable"
+  ) {
+    return value;
+  }
+
+  return "user_only";
+}
+
+function normalizeAIAssistRiskLevel(value: unknown): ArrangementAIAssistRiskLevel {
+  if (value === "low" || value === "medium" || value === "high") return value;
+
+  return "low";
+}
+
+function normalizeAIAssistOutputType(
+  value: unknown,
+  fallback: ArrangementAIAssistOutputType = "draft"
+): ArrangementAIAssistOutputType {
+  if (
+    value === "draft" ||
+    value === "checklist" ||
+    value === "steps" ||
+    value === "reminder" ||
+    value === "summary"
+  ) {
+    return value;
+  }
+
+  return fallback;
+}
+
+function normalizeAIAssistSuggestedAction(
+  value: unknown,
+  index: number
+): ArrangementAIAssistSuggestedAction | null {
+  if (!value || typeof value !== "object") return null;
+
+  const action = value as Partial<ArrangementAIAssistSuggestedAction>;
+  const title = normalizeText(action.title);
+  if (!title) return null;
+
+  return {
+    actionId: normalizeText(action.actionId) || `ai-action-${index}`,
+    title,
+    description: normalizeText(action.description),
+    riskLevel: normalizeAIAssistRiskLevel(action.riskLevel),
+    requiresUserConfirmation: action.requiresUserConfirmation === true,
+    outputType: normalizeAIAssistOutputType(action.outputType),
+  };
+}
+
+function normalizeAIAssistGeneratedResult(
+  value: unknown,
+  index: number
+): ArrangementAIAssistGeneratedResult | null {
+  if (!value || typeof value !== "object") return null;
+
+  const result = value as Partial<ArrangementAIAssistGeneratedResult>;
+  const actionId = normalizeText(result.actionId);
+  const title = normalizeText(result.title);
+  const content = normalizeText(result.content);
+  if (!actionId || !title || !content) return null;
+
+  const createdAt = normalizeTimestamp(result.createdAt) ?? Date.now() + index;
+  return {
+    id: normalizeText(result.id) || `ai-assist-result-${createdAt}-${index}`,
+    actionId,
+    title,
+    content,
+    outputType: normalizeAIAssistOutputType(result.outputType),
+    createdAt,
+    requiresUserConfirmation: result.requiresUserConfirmation === true,
+    ...(normalizeText(result.safetyNote)
+      ? { safetyNote: normalizeText(result.safetyNote) }
+      : {}),
+  };
+}
+
+function normalizeAIAssistState(value: unknown): ArrangementAIAssistState | undefined {
+  if (!value || typeof value !== "object") return undefined;
+
+  const assist = value as Partial<ArrangementAIAssistState>;
+  const suggestedActions = Array.isArray(assist.suggestedActions)
+    ? assist.suggestedActions
+        .map(normalizeAIAssistSuggestedAction)
+        .filter((action): action is ArrangementAIAssistSuggestedAction => Boolean(action))
+        .slice(0, 5)
+    : [];
+  const generatedResults = Array.isArray(assist.generatedResults)
+    ? assist.generatedResults
+        .map(normalizeAIAssistGeneratedResult)
+        .filter((result): result is ArrangementAIAssistGeneratedResult => Boolean(result))
+    : [];
+  const analyzedAt = normalizeTimestamp(assist.analyzedAt) ?? Date.now();
+
+  return {
+    executionType: normalizeExecutionType(assist.executionType),
+    confidence:
+      typeof assist.confidence === "number" && Number.isFinite(assist.confidence)
+        ? Math.min(Math.max(assist.confidence, 0), 1)
+        : 0,
+    suggestedActions,
+    reason: normalizeText(assist.reason),
+    risks: Array.isArray(assist.risks)
+      ? assist.risks.map(normalizeText).filter(Boolean)
+      : [],
+    analyzedAt,
+    generatedResults,
   };
 }
 
@@ -385,7 +537,8 @@ function normalizeRelatedContext(
     context.role === "request" ||
     context.role === "commitment" ||
     context.role === "supplement" ||
-    context.role === "progress"
+    context.role === "progress" ||
+    context.role === "status_change"
       ? context.role
       : "supplement";
 
@@ -495,6 +648,69 @@ function normalizeMergeSnapshot(value: unknown): ArrangementMergeSnapshot | null
   };
 }
 
+function normalizeStatusHistoryItem(
+  value: unknown,
+  index: number
+): ArrangementStatusHistoryItem | null {
+  if (!value || typeof value !== "object") return null;
+
+  const history = value as Partial<ArrangementStatusHistoryItem>;
+  const changedAt = normalizeTimestamp(history.changedAt);
+  const previousSnapshot = normalizeStatusChangeSnapshot(history.previousSnapshot);
+  if (!changedAt || !previousSnapshot) return null;
+
+  return {
+    id: normalizeText(history.id) || `status-history-${changedAt}-${index}`,
+    changeType: normalizeStatusChangeType(history.changeType),
+    changedAt,
+    previousSnapshot,
+    newStatus: normalizeStatus(history.newStatus),
+    newTime: normalizeText(history.newTime) || null,
+    progressNote: normalizeText(history.progressNote),
+    sourceMessageIds: Array.isArray(history.sourceMessageIds)
+      ? history.sourceMessageIds.map(normalizeText).filter(Boolean)
+      : [],
+    sourceText: normalizeText(history.sourceText),
+    confidence:
+      typeof history.confidence === "number" && Number.isFinite(history.confidence)
+        ? Math.min(Math.max(history.confidence, 0), 1)
+        : 0,
+    reason: normalizeText(history.reason),
+  };
+}
+
+function normalizeStatusChangeSnapshot(
+  value: unknown
+): ArrangementStatusChangeSnapshot | null {
+  if (!value || typeof value !== "object") return null;
+
+  const snapshot = value as Partial<ArrangementStatusChangeSnapshot>;
+  return {
+    status: normalizeStatus(snapshot.status),
+    timeType: normalizeTimeType(snapshot.timeType),
+    startTime: normalizeTimestamp(snapshot.startTime),
+    endTime: normalizeTimestamp(snapshot.endTime),
+    dueTime: normalizeTimestamp(snapshot.dueTime),
+    fuzzyTimeLabel: normalizeText(snapshot.fuzzyTimeLabel),
+    sourceMessageIds: Array.isArray(snapshot.sourceMessageIds)
+      ? snapshot.sourceMessageIds.map(normalizeText).filter(Boolean)
+      : [],
+    mergedSourceIds: Array.isArray(snapshot.mergedSourceIds)
+      ? snapshot.mergedSourceIds.map(normalizeText).filter(Boolean)
+      : [],
+    relatedContexts: Array.isArray(snapshot.relatedContexts)
+      ? snapshot.relatedContexts
+          .map(normalizeRelatedContext)
+          .filter((context): context is ArrangementRelatedContext => Boolean(context))
+      : [],
+    progressNotes: Array.isArray(snapshot.progressNotes)
+      ? snapshot.progressNotes
+          .map(normalizeProgressNote)
+          .filter((note): note is ArrangementProgressNote => Boolean(note))
+      : [],
+  };
+}
+
 function normalizeMergeType(value: unknown): ArrangementMergeType {
   if (
     value === "add_items" ||
@@ -510,6 +726,35 @@ function normalizeMergeType(value: unknown): ArrangementMergeType {
   }
 
   return "add_context";
+}
+
+function normalizeStatusChangeType(value: unknown): ArrangementStatusChangeType {
+  if (
+    value === "completed" ||
+    value === "in_progress" ||
+    value === "canceled" ||
+    value === "rescheduled" ||
+    value === "progress_update" ||
+    value === "ignore"
+  ) {
+    return value;
+  }
+
+  return "ignore";
+}
+
+function normalizeRelationReason(value: unknown): GroupChatRelationReason | "" {
+  if (
+    value === "mentioned" ||
+    value === "committed" ||
+    value === "assigned" ||
+    value === "confirmed" ||
+    value === "not_related"
+  ) {
+    return value;
+  }
+
+  return "";
 }
 
 function normalizeArrangement(value: unknown, index: number): ArrangementItem | null {
@@ -546,12 +791,21 @@ function normalizeArrangement(value: unknown, index: number): ArrangementItem | 
         .map(normalizeMergeHistoryItem)
         .filter((history): history is ArrangementMergeHistoryItem => Boolean(history))
     : [];
+  const statusHistory = Array.isArray(arrangement.statusHistory)
+    ? arrangement.statusHistory
+        .map(normalizeStatusHistoryItem)
+        .filter((history): history is ArrangementStatusHistoryItem => Boolean(history))
+    : [];
+  const aiAssist = normalizeAIAssistState(arrangement.aiAssist);
+  const executionType =
+    aiAssist?.executionType ?? normalizeExecutionType(arrangement.executionType);
 
   return {
     id: normalizeText(arrangement.id) || `arrangement-${timestamp}`,
     title,
     note: normalizeText(arrangement.note),
     status: normalizeStatus(arrangement.status),
+    ...(executionType !== "user_only" || aiAssist ? { executionType } : {}),
     timeType: normalizeTimeType(arrangement.timeType),
     startTime: normalizeTimestamp(arrangement.startTime),
     endTime: normalizeTimestamp(arrangement.endTime),
@@ -569,12 +823,14 @@ function normalizeArrangement(value: unknown, index: number): ArrangementItem | 
       : {}),
     relatedContexts,
     progressNotes,
+    statusHistory,
     mergeHistory,
     relatedPeople,
     reminder: normalizeReminder(arrangement.reminder),
     ...(normalizeAIFeedback(arrangement.aiFeedback)
       ? { aiFeedback: normalizeAIFeedback(arrangement.aiFeedback) }
       : {}),
+    ...(aiAssist ? { aiAssist } : {}),
     createdAt: normalizeTimestamp(arrangement.createdAt) ?? timestamp,
     updatedAt: normalizeTimestamp(arrangement.updatedAt) ?? timestamp,
   };
@@ -615,6 +871,7 @@ export function createArrangement(draft: ArrangementDraft): ArrangementItem | nu
     mergedSourceIds: [],
     relatedContexts: [],
     progressNotes: [],
+    statusHistory: [],
     mergeHistory: [],
     relatedPeople: [],
     reminder,
@@ -649,6 +906,7 @@ export function createArrangementFromAICandidate(
 
   const timestamp = Date.now();
   const sourceScene = normalizeAISourceScene(source.scene);
+  const relationReason = normalizeRelationReason(source.relationReason);
   const timeFields = buildArrangementTimeFieldsFromAI(result);
   const reminder = buildArrangementReminderFromAI(result, timeFields);
   const arrangement: ArrangementItem = {
@@ -686,12 +944,14 @@ export function createArrangementFromAICandidate(
       ...(normalizeText(source.beneficiary)
         ? { beneficiary: normalizeText(source.beneficiary) }
         : {}),
+      ...(relationReason ? { relationReason } : {}),
       detectedAt: source.detectedAt,
       confidence: source.confidence,
       ...(source.candidateId ? { candidateId: source.candidateId } : {}),
     },
     relatedContexts: buildInitialRelatedContexts(source, timestamp),
     progressNotes: [],
+    statusHistory: [],
     mergeHistory: [],
     relatedPeople: result.arrangement.relatedPeople.map((name, index) => ({
       id: `ai-person-${timestamp}-${index}`,
@@ -734,6 +994,95 @@ export function updateArrangement(
       ...timeFields,
       reminder,
       updatedAt: Date.now(),
+    };
+
+    updatedArrangement = nextArrangement;
+    return nextArrangement;
+  });
+
+  if (!updatedArrangement) return null;
+  persistArrangements(updatedArrangements);
+  return updatedArrangement;
+}
+
+export function saveArrangementAIAssistAnalysis(
+  arrangementId: string,
+  result: ArrangementAIAssistSuggestionResult
+): ArrangementItem | null {
+  const arrangements = getInitialArrangements();
+  let updatedArrangement: ArrangementItem | null = null;
+  const timestamp = Date.now();
+
+  const updatedArrangements = arrangements.map((arrangement) => {
+    if (arrangement.id !== arrangementId) return arrangement;
+
+    const aiAssist = normalizeAIAssistState({
+      executionType: result.executionType,
+      confidence: result.confidence,
+      suggestedActions: result.suggestedActions,
+      reason: result.reason,
+      risks: result.risks,
+      analyzedAt: timestamp,
+      generatedResults: arrangement.aiAssist?.generatedResults ?? [],
+    });
+    const nextArrangement: ArrangementItem = {
+      ...arrangement,
+      executionType: aiAssist?.executionType ?? result.executionType,
+      ...(aiAssist ? { aiAssist } : {}),
+      updatedAt: timestamp,
+    };
+
+    updatedArrangement = nextArrangement;
+    return nextArrangement;
+  });
+
+  if (!updatedArrangement) return null;
+  persistArrangements(updatedArrangements);
+  return updatedArrangement;
+}
+
+export function addArrangementAIAssistGeneratedResult(
+  arrangementId: string,
+  action: ArrangementAIAssistSuggestedAction,
+  result: ArrangementAIAssistGenerationResult
+): ArrangementItem | null {
+  const arrangements = getInitialArrangements();
+  let updatedArrangement: ArrangementItem | null = null;
+  const timestamp = Date.now();
+
+  const updatedArrangements = arrangements.map((arrangement) => {
+    if (arrangement.id !== arrangementId) return arrangement;
+
+    const generatedResult: ArrangementAIAssistGeneratedResult = {
+      id: `ai-assist-result-${timestamp}`,
+      actionId: action.actionId,
+      title: normalizeText(result.title) || action.title,
+      content: normalizeText(result.content),
+      outputType: normalizeAIAssistOutputType(result.outputType, action.outputType),
+      createdAt: timestamp,
+      requiresUserConfirmation:
+        result.requiresUserConfirmation || action.requiresUserConfirmation,
+      ...(normalizeText(result.safetyNote)
+        ? { safetyNote: normalizeText(result.safetyNote) }
+        : {}),
+    };
+    if (!generatedResult.content) return arrangement;
+
+    const existingAssist = arrangement.aiAssist;
+    const aiAssist = normalizeAIAssistState({
+      executionType: existingAssist?.executionType ?? arrangement.executionType ?? "ai_assist",
+      confidence: existingAssist?.confidence ?? 0,
+      suggestedActions: existingAssist?.suggestedActions ?? [action],
+      reason: existingAssist?.reason ?? "",
+      risks: existingAssist?.risks ?? [],
+      analyzedAt: existingAssist?.analyzedAt ?? timestamp,
+      generatedResults: [...(existingAssist?.generatedResults ?? []), generatedResult],
+    });
+    const nextArrangement: ArrangementItem = {
+      ...arrangement,
+      executionType: aiAssist?.executionType ?? "ai_assist",
+      ...(aiAssist ? { aiAssist } : {}),
+      updatedAt: timestamp,
     };
 
     updatedArrangement = nextArrangement;
@@ -916,6 +1265,101 @@ export function mergeArrangementSupplement(
   return updatedArrangement;
 }
 
+export function applyArrangementStatusChange(
+  source: ArrangementAIStatusChangeSource
+): ArrangementItem | null {
+  if (source.statusChangeType === "ignore") return null;
+
+  const arrangements = getInitialArrangements();
+  let updatedArrangement: ArrangementItem | null = null;
+  const timestamp = Date.now();
+
+  const updatedArrangements = arrangements.map((arrangement) => {
+    if (arrangement.id !== source.targetArrangementId) return arrangement;
+    if (arrangement.status === "ignored") return arrangement;
+
+    const normalizedSourceMessageIds = uniqueTextValues([
+      source.sourceMessageId,
+      ...source.sourceMessageIds,
+    ]);
+    if (
+      normalizedSourceMessageIds.length === 0 ||
+      normalizedSourceMessageIds.every((messageId) =>
+        arrangement.sourceMessageIds.includes(messageId) ||
+        arrangement.mergedSourceIds.includes(messageId)
+      )
+    ) {
+      return arrangement;
+    }
+
+    const previousSnapshot = createStatusChangeSnapshot(arrangement);
+    const nextRelatedContexts = mergeRelatedContexts(
+      arrangement.relatedContexts,
+      source.sourceMessages,
+      timestamp
+    );
+    const nextProgressNotes = mergeProgressNotes(
+      arrangement.progressNotes,
+      {
+        content: normalizeText(source.progressNote),
+        sourceMessageIds: normalizedSourceMessageIds,
+        confidence: source.confidence,
+        reason: source.reason,
+      },
+      timestamp
+    );
+    const nextTimeFields =
+      source.statusChangeType === "rescheduled"
+        ? buildTimeFieldsFromStatusNewTime(source.newTime, arrangement)
+        : {
+            timeType: arrangement.timeType,
+            startTime: arrangement.startTime,
+            endTime: arrangement.endTime,
+            dueTime: arrangement.dueTime,
+            fuzzyTimeLabel: arrangement.fuzzyTimeLabel,
+          };
+    const nextStatus = getStatusAfterStatusChange(source, arrangement.status);
+    const historyItem: ArrangementStatusHistoryItem = {
+      id: `arrangement-status-${timestamp}`,
+      changeType: source.statusChangeType,
+      changedAt: timestamp,
+      previousSnapshot,
+      newStatus: nextStatus,
+      newTime: normalizeText(source.newTime) || null,
+      progressNote: normalizeText(source.progressNote),
+      sourceMessageIds: normalizedSourceMessageIds,
+      sourceText: normalizeText(source.sourceText),
+      confidence: source.confidence,
+      reason: normalizeText(source.reason),
+    };
+
+    const nextArrangement: ArrangementItem = {
+      ...arrangement,
+      status: nextStatus,
+      ...nextTimeFields,
+      sourceMessageIds: uniqueTextValues([
+        ...arrangement.sourceMessageIds,
+        ...normalizedSourceMessageIds,
+      ]),
+      mergedSourceIds: uniqueTextValues([
+        ...arrangement.mergedSourceIds,
+        ...normalizedSourceMessageIds,
+      ]),
+      relatedContexts: nextRelatedContexts,
+      progressNotes: nextProgressNotes,
+      statusHistory: [...arrangement.statusHistory, historyItem],
+      updatedAt: timestamp,
+    };
+
+    updatedArrangement = nextArrangement;
+    return nextArrangement;
+  });
+
+  if (!updatedArrangement) return null;
+  persistArrangements(updatedArrangements);
+  return updatedArrangement;
+}
+
 export function undoLastArrangementMerge(arrangementId: string): ArrangementItem | null {
   const arrangements = getInitialArrangements();
   let updatedArrangement: ArrangementItem | null = null;
@@ -945,6 +1389,46 @@ export function undoLastArrangementMerge(arrangementId: string): ArrangementItem
       relatedContexts: snapshot.relatedContexts,
       progressNotes: snapshot.progressNotes,
       mergeHistory: previousMergeHistory,
+      updatedAt: Date.now(),
+    };
+
+    updatedArrangement = nextArrangement;
+    return nextArrangement;
+  });
+
+  if (!updatedArrangement) return null;
+  persistArrangements(updatedArrangements);
+  return updatedArrangement;
+}
+
+export function undoLastArrangementStatusChange(
+  arrangementId: string
+): ArrangementItem | null {
+  const arrangements = getInitialArrangements();
+  let updatedArrangement: ArrangementItem | null = null;
+
+  const updatedArrangements = arrangements.map((arrangement) => {
+    if (arrangement.id !== arrangementId || arrangement.statusHistory.length === 0) {
+      return arrangement;
+    }
+
+    const previousStatusHistory = arrangement.statusHistory.slice(0, -1);
+    const snapshot = arrangement.statusHistory.at(-1)?.previousSnapshot;
+    if (!snapshot) return arrangement;
+
+    const nextArrangement: ArrangementItem = {
+      ...arrangement,
+      status: snapshot.status,
+      timeType: snapshot.timeType,
+      startTime: snapshot.startTime,
+      endTime: snapshot.endTime,
+      dueTime: snapshot.dueTime,
+      fuzzyTimeLabel: snapshot.fuzzyTimeLabel,
+      sourceMessageIds: snapshot.sourceMessageIds,
+      mergedSourceIds: snapshot.mergedSourceIds,
+      relatedContexts: snapshot.relatedContexts,
+      progressNotes: snapshot.progressNotes,
+      statusHistory: previousStatusHistory,
       updatedAt: Date.now(),
     };
 
@@ -1273,6 +1757,23 @@ function createMergeSnapshot(arrangement: ArrangementItem): ArrangementMergeSnap
   };
 }
 
+function createStatusChangeSnapshot(
+  arrangement: ArrangementItem
+): ArrangementStatusChangeSnapshot {
+  return {
+    status: arrangement.status,
+    timeType: arrangement.timeType,
+    startTime: arrangement.startTime,
+    endTime: arrangement.endTime,
+    dueTime: arrangement.dueTime,
+    fuzzyTimeLabel: arrangement.fuzzyTimeLabel,
+    sourceMessageIds: [...arrangement.sourceMessageIds],
+    mergedSourceIds: [...arrangement.mergedSourceIds],
+    relatedContexts: arrangement.relatedContexts.map((context) => ({ ...context })),
+    progressNotes: arrangement.progressNotes.map((note) => ({ ...note })),
+  };
+}
+
 function mergeRelatedContexts(
   existingContexts: ArrangementRelatedContext[],
   sourceMessages: ArrangementAIMergeSourceMessage[],
@@ -1397,6 +1898,66 @@ function buildTimeFieldsFromMerge(
   };
 }
 
+function buildTimeFieldsFromStatusNewTime(
+  newTime: string | null,
+  arrangement: ArrangementItem
+): Pick<
+  ArrangementItem,
+  "timeType" | "startTime" | "endTime" | "dueTime" | "fuzzyTimeLabel"
+> {
+  const normalizedNewTime = normalizeText(newTime);
+  if (!normalizedNewTime) {
+    return {
+      timeType: arrangement.timeType,
+      startTime: arrangement.startTime,
+      endTime: arrangement.endTime,
+      dueTime: arrangement.dueTime,
+      fuzzyTimeLabel: arrangement.fuzzyTimeLabel,
+    };
+  }
+
+  const parsedTime = parseAITime(normalizedNewTime);
+  if (parsedTime !== null) {
+    return {
+      timeType: "datetime",
+      startTime: parsedTime,
+      endTime: null,
+      dueTime: null,
+      fuzzyTimeLabel: "",
+    };
+  }
+
+  return {
+    timeType: "fuzzy",
+    startTime: null,
+    endTime: null,
+    dueTime: null,
+    fuzzyTimeLabel: normalizedNewTime,
+  };
+}
+
+function getStatusAfterStatusChange(
+  source: Pick<
+    ArrangementAIStatusChangeSource,
+    "statusChangeType" | "newStatus"
+  >,
+  currentStatus: ArrangementStatus
+): ArrangementStatus {
+  if (source.statusChangeType === "completed") return "completed";
+  if (source.statusChangeType === "canceled") return "canceled";
+  if (source.statusChangeType === "in_progress") return "in_progress";
+  if (source.statusChangeType === "rescheduled") {
+    return currentStatus === "completed" || currentStatus === "canceled"
+      ? "pending"
+      : currentStatus;
+  }
+  if (source.statusChangeType === "progress_update") {
+    return currentStatus === "later" ? "in_progress" : currentStatus;
+  }
+
+  return normalizeStatus(source.newStatus);
+}
+
 function buildTitleWithAddedItems(title: string, addedItems: string[]) {
   const normalizedItems = uniqueTextValues(addedItems);
   if (normalizedItems.length === 0) return title;
@@ -1516,6 +2077,9 @@ export function hasArrangementForSourceMessage(sourceMessageId: string) {
       ) ||
       arrangement.progressNotes.some((note) =>
         note.sourceMessageIds.includes(normalizedSourceMessageId)
+      ) ||
+      arrangement.statusHistory.some((history) =>
+        history.sourceMessageIds.includes(normalizedSourceMessageId)
       )
   );
 }

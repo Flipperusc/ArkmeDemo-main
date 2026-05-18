@@ -1,4 +1,11 @@
-import type { ArrangementItem } from "@/types/arrangement";
+import type {
+  ArrangementAIAssistOutputType,
+  ArrangementAIAssistSuggestedAction,
+  ArrangementExecutionType,
+  ArrangementItem,
+  ArrangementStatus,
+  ArrangementStatusChangeType,
+} from "@/types/arrangement";
 
 export type ArrangementAIScene =
   | "self_chat"
@@ -121,6 +128,53 @@ export type PrivateChatCommitmentResult = {
   risks: string[];
 };
 
+export type GroupChatRelationReason =
+  | "mentioned"
+  | "committed"
+  | "assigned"
+  | "confirmed"
+  | "not_related";
+
+export type GroupChatMemberSummary = {
+  id: string;
+  name: string;
+  nicknames?: string[];
+};
+
+export type GroupChatMentionInfo = {
+  messageId: string;
+  mentionedCurrentUser: boolean;
+  mentionedUserIds: string[];
+  rawText: string;
+};
+
+export type GroupChatRelatedArrangementInput = {
+  currentUserId: string;
+  currentUserName?: string;
+  currentUserAliases?: string[];
+  groupId: string;
+  groupName: string;
+  messages: ArrangementAIMessage[];
+  memberSummaries?: GroupChatMemberSummary[];
+  mentions?: GroupChatMentionInfo[];
+  existingArrangements?: ArrangementItem[];
+  timezone?: string;
+  now: string;
+};
+
+export type GroupChatRelatedArrangementResult = {
+  hasArrangement: boolean;
+  isRelatedToCurrentUser: boolean;
+  relationReason: GroupChatRelationReason;
+  hasUserCommitted: boolean;
+  shouldCreate: boolean;
+  confidence: number;
+  arrangement: ArrangementCandidateEntity;
+  needsUserConfirmation: boolean;
+  reason: string;
+  risks: string[];
+};
+
 export type PrivateChatSupplementMergeType =
   | "add_items"
   | "update_time"
@@ -186,6 +240,68 @@ export type ArrangementSimilarityMergeResult = {
   needsUserConfirmation: boolean;
 };
 
+export type ArrangementStatusChangeInput = {
+  currentUserId: string;
+  currentUserName?: string;
+  sourceType: Extract<ArrangementAIScene, "self_chat" | "private_chat">;
+  sourceLabel: string;
+  sourceMessageId: string;
+  sourceText: string;
+  sourceMessages: ArrangementAIMessage[];
+  candidateArrangements: ArrangementItem[];
+  timezone?: string;
+  now: string;
+};
+
+export type ArrangementStatusChangeResult = {
+  hasStatusChange: boolean;
+  relatedArrangementId: string;
+  confidence: number;
+  statusChangeType: ArrangementStatusChangeType;
+  newStatus: ArrangementStatus;
+  progressNote: string;
+  newTime: string | null;
+  sourceMessageIds: string[];
+  needsUserConfirmation: boolean;
+  reason: string;
+};
+
 export type ArrangementAIMergeCandidateResult =
   | PrivateChatSupplementMergeResult
-  | ArrangementSimilarityMergeResult;
+  | ArrangementSimilarityMergeResult
+  | ArrangementStatusChangeResult;
+
+export type ArrangementAIAssistSuggestionInput = {
+  currentUserId: string;
+  currentUserName?: string;
+  arrangement: ArrangementItem;
+  timezone?: string;
+  now: string;
+};
+
+export type ArrangementAIAssistSuggestionResult = {
+  executionType: ArrangementExecutionType;
+  confidence: number;
+  suggestedActions: ArrangementAIAssistSuggestedAction[];
+  reason: string;
+  risks: string[];
+};
+
+export type ArrangementAIAssistGenerationInput = {
+  currentUserId: string;
+  currentUserName?: string;
+  arrangement: ArrangementItem;
+  action: ArrangementAIAssistSuggestedAction;
+  timezone?: string;
+  now: string;
+};
+
+export type ArrangementAIAssistGenerationResult = {
+  title: string;
+  content: string;
+  outputType: ArrangementAIAssistOutputType;
+  requiresUserConfirmation: boolean;
+  safetyNote: string;
+  reason: string;
+  risks: string[];
+};

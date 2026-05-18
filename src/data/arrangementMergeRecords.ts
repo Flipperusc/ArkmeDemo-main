@@ -144,7 +144,10 @@ function normalizeSourceMessages(value: unknown) {
       if (!id || !content) return null;
 
       const role =
-        item.role === "request" || item.role === "commitment"
+        item.role === "request" ||
+        item.role === "commitment" ||
+        item.role === "progress" ||
+        item.role === "status_change"
           ? item.role
           : "supplement";
       const createdAt = normalizeTimestamp(item.createdAt);

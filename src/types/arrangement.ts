@@ -1,4 +1,12 @@
-export type ArrangementStatus = "pending" | "completed" | "later" | "ignored";
+import type { GroupChatRelationReason } from "@/types/arrangementAI";
+
+export type ArrangementStatus =
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "later"
+  | "canceled"
+  | "ignored";
 
 export type ArrangementTimeType =
   | "none"
@@ -42,6 +50,7 @@ export type ArrangementSourceContext = {
   commitmentMessageContent?: string;
   executor?: string;
   beneficiary?: string;
+  relationReason?: GroupChatRelationReason;
   detectedAt: number | null;
   confidence: number | null;
   candidateId?: string;
@@ -51,7 +60,8 @@ export type ArrangementRelatedContextRole =
   | "request"
   | "commitment"
   | "supplement"
-  | "progress";
+  | "progress"
+  | "status_change";
 
 export type ArrangementRelatedContext = {
   id: string;
@@ -78,6 +88,42 @@ export type ArrangementProgressNote = {
   content: string;
   sourceMessageIds: string[];
   createdAt: number;
+  confidence: number;
+  reason: string;
+};
+
+export type ArrangementStatusChangeType =
+  | "completed"
+  | "in_progress"
+  | "canceled"
+  | "rescheduled"
+  | "progress_update"
+  | "ignore";
+
+export type ArrangementStatusChangeSnapshot = Pick<
+  ArrangementItem,
+  | "status"
+  | "timeType"
+  | "startTime"
+  | "endTime"
+  | "dueTime"
+  | "fuzzyTimeLabel"
+  | "sourceMessageIds"
+  | "mergedSourceIds"
+  | "relatedContexts"
+  | "progressNotes"
+>;
+
+export type ArrangementStatusHistoryItem = {
+  id: string;
+  changeType: ArrangementStatusChangeType;
+  changedAt: number;
+  previousSnapshot: ArrangementStatusChangeSnapshot;
+  newStatus: ArrangementStatus;
+  newTime: string | null;
+  progressNote: string;
+  sourceMessageIds: string[];
+  sourceText: string;
   confidence: number;
   reason: string;
 };
@@ -118,11 +164,56 @@ export type ArrangementAIFeedback = {
   note?: string;
 };
 
+export type ArrangementExecutionType =
+  | "user_only"
+  | "ai_assist"
+  | "ai_executable";
+
+export type ArrangementAIAssistRiskLevel = "low" | "medium" | "high";
+
+export type ArrangementAIAssistOutputType =
+  | "draft"
+  | "checklist"
+  | "steps"
+  | "reminder"
+  | "summary";
+
+export type ArrangementAIAssistSuggestedAction = {
+  actionId: string;
+  title: string;
+  description: string;
+  riskLevel: ArrangementAIAssistRiskLevel;
+  requiresUserConfirmation: boolean;
+  outputType: ArrangementAIAssistOutputType;
+};
+
+export type ArrangementAIAssistGeneratedResult = {
+  id: string;
+  actionId: string;
+  title: string;
+  content: string;
+  outputType: ArrangementAIAssistOutputType;
+  createdAt: number;
+  requiresUserConfirmation: boolean;
+  safetyNote?: string;
+};
+
+export type ArrangementAIAssistState = {
+  executionType: ArrangementExecutionType;
+  confidence: number;
+  suggestedActions: ArrangementAIAssistSuggestedAction[];
+  reason: string;
+  risks: string[];
+  analyzedAt: number;
+  generatedResults: ArrangementAIAssistGeneratedResult[];
+};
+
 export type ArrangementItem = {
   id: string;
   title: string;
   note: string;
   status: ArrangementStatus;
+  executionType?: ArrangementExecutionType;
   timeType: ArrangementTimeType;
   startTime: number | null;
   endTime: number | null;
@@ -136,10 +227,12 @@ export type ArrangementItem = {
   sourceContext?: ArrangementSourceContext;
   relatedContexts: ArrangementRelatedContext[];
   progressNotes: ArrangementProgressNote[];
+  statusHistory: ArrangementStatusHistoryItem[];
   mergeHistory: ArrangementMergeHistoryItem[];
   relatedPeople: ArrangementRelatedPerson[];
   reminder: ArrangementReminder;
   aiFeedback?: ArrangementAIFeedback;
+  aiAssist?: ArrangementAIAssistState;
   createdAt: number;
   updatedAt: number;
 };

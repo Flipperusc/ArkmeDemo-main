@@ -1,6 +1,7 @@
 import React from "react";
 import Button from "@/components/ui/button";
 import {
+  addArrangementAIAssistGeneratedResult,
   arrangementsStorageEvent,
   arrangementsStorageKey,
   continueArrangement,
@@ -10,7 +11,9 @@ import {
   markArrangementAIWrong,
   markArrangementContextNotSame,
   removeArrangementRelatedContext,
+  saveArrangementAIAssistAnalysis,
   undoLastArrangementMerge,
+  undoLastArrangementStatusChange,
   updateArrangement,
   updateArrangementStatus,
   type ArrangementDraft,
@@ -20,13 +23,21 @@ import {
   recordArrangementAIFeedback,
   updateArrangementAICandidateStatus,
 } from "@/data/arrangementAIRecords";
+import { useCandidateProfile } from "@/data/candidateProfile";
 import { cn } from "@/lib/utils";
+import {
+  analyzeArrangementAIAssist,
+  generateArrangementAIAssistContent,
+} from "@/services/arrangementAIAssistService";
+import { getAISettings } from "@/services/aiSettings";
 import { usePreferences } from "@/settings/preferences";
 import type {
+  ArrangementAIAssistSuggestedAction,
   ArrangementItem,
   ArrangementMergeHistoryItem,
   ArrangementRelatedContextRole,
   ArrangementStatus,
+  ArrangementStatusHistoryItem,
 } from "@/types/arrangement";
 
 type ArrangementViewMode = "list" | "create" | "detail" | "edit";
@@ -62,19 +73,32 @@ const reminderOffsetOptions = [0, 10, 30, 60, 60 * 24] as const;
 
 const arrangementStatusOrder: Record<ArrangementStatus, number> = {
   pending: 0,
-  later: 1,
-  completed: 2,
-  ignored: 3,
+  in_progress: 1,
+  later: 2,
+  completed: 3,
+  canceled: 4,
+  ignored: 5,
 };
 
 export default function Arrangements() {
   const { resolvedLocale, t } = usePreferences();
+  const candidateProfile = useCandidateProfile();
   const [arrangements, setArrangements] = React.useState(getInitialArrangements);
   const [viewMode, setViewMode] = React.useState<ArrangementViewMode>("list");
   const [listScope, setListScope] = React.useState<ArrangementListScope>("pending");
   const [displayMode, setDisplayMode] = React.useState<ArrangementDisplayMode>("list");
   const [selectedArrangementId, setSelectedArrangementId] = React.useState<string | null>(
     null
+  );
+  const [aiAssistAnalyzingId, setAIAssistAnalyzingId] = React.useState<string | null>(
+    null
+  );
+  const [aiAssistRunningAction, setAIAssistRunningAction] = React.useState<string | null>(
+    null
+  );
+  const [aiAssistError, setAIAssistError] = React.useState<string>("");
+  const [aiAssistAttemptedIds, setAIAssistAttemptedIds] = React.useState<Set<string>>(
+    () => new Set()
   );
 
   React.useEffect(() => {
@@ -112,10 +136,13 @@ export default function Arrangements() {
 
   const arrangementCounts = React.useMemo(
     () => ({
-      pending: arrangements.filter((arrangement) => arrangement.status === "pending").length,
+      pending: arrangements.filter((arrangement) =>
+        isArrangementInListScope(arrangement, "pending")
+      ).length,
       later: arrangements.filter((arrangement) => arrangement.status === "later").length,
-      completed: arrangements.filter((arrangement) => arrangement.status === "completed")
-        .length,
+      completed: arrangements.filter((arrangement) =>
+        isArrangementInListScope(arrangement, "completed")
+      ).length,
     }),
     [arrangements]
   );
@@ -123,12 +150,15 @@ export default function Arrangements() {
   const visibleArrangements = React.useMemo(
     () =>
       arrangements
-        .filter((arrangement) => arrangement.status === listScope)
+        .filter((arrangement) => isArrangementInListScope(arrangement, listScope))
         .sort((a, b) => sortArrangementsByScope(a, b, listScope)),
     [arrangements, listScope]
   );
 
-  const refreshArrangements = () => setArrangements(getInitialArrangements());
+  const refreshArrangements = React.useCallback(
+    () => setArrangements(getInitialArrangements()),
+    []
+  );
 
   const handleCreate = (draft: ArrangementDraft) => {
     const arrangement = createArrangement(draft);
@@ -209,6 +239,11 @@ export default function Arrangements() {
     refreshArrangements();
   };
 
+  const handleUndoLastStatusChange = (arrangementId: string) => {
+    undoLastArrangementStatusChange(arrangementId);
+    refreshArrangements();
+  };
+
   const handleRemoveRelatedContext = (arrangementId: string, contextId: string) => {
     removeArrangementRelatedContext(arrangementId, contextId);
     refreshArrangements();
@@ -218,6 +253,75 @@ export default function Arrangements() {
     markArrangementContextNotSame(arrangementId, contextId);
     refreshArrangements();
   };
+
+  const handleAnalyzeAIAssist = React.useCallback(
+    async (arrangementId: string) => {
+      const arrangement = getInitialArrangements().find(
+        (item) => item.id === arrangementId
+      );
+      if (!arrangement || arrangement.aiAssist || aiAssistAttemptedIds.has(arrangementId)) {
+        return;
+      }
+
+      const settings = await getAISettings();
+      if (!settings.enableAI || !settings.hasApiKey) return;
+
+      setAIAssistAttemptedIds((previous) => {
+        const next = new Set(previous);
+        next.add(arrangementId);
+        return next;
+      });
+      setAIAssistError("");
+      setAIAssistAnalyzingId(arrangementId);
+      const result = await analyzeArrangementAIAssist({
+        currentUserId: "demo",
+        currentUserName: candidateProfile?.name || "我",
+        arrangement,
+        timezone: getRuntimeTimezone(),
+        now: new Date().toISOString(),
+      });
+      setAIAssistAnalyzingId(null);
+      if (!result.ok) {
+        setAIAssistError(result.error.message);
+        return;
+      }
+
+      saveArrangementAIAssistAnalysis(arrangementId, result.data);
+      refreshArrangements();
+    },
+    [aiAssistAttemptedIds, candidateProfile?.name, refreshArrangements]
+  );
+
+  const handleRunAIAssistAction = React.useCallback(
+    async (arrangementId: string, action: ArrangementAIAssistSuggestedAction) => {
+      const arrangement = getInitialArrangements().find(
+        (item) => item.id === arrangementId
+      );
+      if (!arrangement) return;
+
+      const runningKey = `${arrangementId}:${action.actionId}`;
+      setAIAssistError("");
+      setAIAssistRunningAction(runningKey);
+      const result = await generateArrangementAIAssistContent({
+        currentUserId: "demo",
+        currentUserName: candidateProfile?.name || "我",
+        arrangement,
+        action,
+        timezone: getRuntimeTimezone(),
+        now: new Date().toISOString(),
+      });
+      setAIAssistRunningAction(null);
+
+      if (!result.ok) {
+        setAIAssistError(result.error.message);
+        return;
+      }
+
+      addArrangementAIAssistGeneratedResult(arrangementId, action, result.data);
+      refreshArrangements();
+    },
+    [candidateProfile?.name, refreshArrangements]
+  );
 
   if (viewMode === "create") {
     return (
@@ -257,12 +361,22 @@ export default function Arrangements() {
         onIgnore={() => handleIgnore(selectedArrangement.id)}
         onMarkAIWrong={() => handleMarkAIWrong(selectedArrangement.id)}
         onUndoLastMerge={() => handleUndoLastMerge(selectedArrangement.id)}
+        onUndoLastStatusChange={() =>
+          handleUndoLastStatusChange(selectedArrangement.id)
+        }
         onRemoveRelatedContext={(contextId) =>
           handleRemoveRelatedContext(selectedArrangement.id, contextId)
         }
         onMarkRelatedContextNotSame={(contextId) =>
           handleMarkRelatedContextNotSame(selectedArrangement.id, contextId)
         }
+        onAnalyzeAIAssist={() => handleAnalyzeAIAssist(selectedArrangement.id)}
+        onRunAIAssistAction={(action) =>
+          handleRunAIAssistAction(selectedArrangement.id, action)
+        }
+        aiAssistAnalyzing={aiAssistAnalyzingId === selectedArrangement.id}
+        aiAssistRunningAction={aiAssistRunningAction}
+        aiAssistError={aiAssistError}
       />
     );
   }
@@ -493,7 +607,7 @@ function ArrangementCardActions({
     );
   }
 
-  if (status === "later") {
+  if (status === "later" || status === "canceled") {
     return (
       <div className="mt-3 flex justify-end">
         <button
@@ -1035,8 +1149,14 @@ function ArrangementDetailScreen({
   onIgnore,
   onMarkAIWrong,
   onUndoLastMerge,
+  onUndoLastStatusChange,
   onRemoveRelatedContext,
   onMarkRelatedContextNotSame,
+  onAnalyzeAIAssist,
+  onRunAIAssistAction,
+  aiAssistAnalyzing,
+  aiAssistRunningAction,
+  aiAssistError,
 }: {
   arrangement: ArrangementItem;
   locale: string;
@@ -1050,12 +1170,23 @@ function ArrangementDetailScreen({
   onIgnore: () => void;
   onMarkAIWrong: () => void;
   onUndoLastMerge: () => void;
+  onUndoLastStatusChange: () => void;
   onRemoveRelatedContext: (contextId: string) => void;
   onMarkRelatedContextNotSame: (contextId: string) => void;
+  onAnalyzeAIAssist: () => void;
+  onRunAIAssistAction: (action: ArrangementAIAssistSuggestedAction) => void;
+  aiAssistAnalyzing: boolean;
+  aiAssistRunningAction: string | null;
+  aiAssistError: string;
 }) {
   const { t } = usePreferences();
   const statusMeta = getStatusMeta(arrangement.status, t);
   const overdueLabel = getGentleOverdueLabel(arrangement, locale, t);
+
+  React.useEffect(() => {
+    if (arrangement.aiAssist || arrangement.status === "ignored") return;
+    onAnalyzeAIAssist();
+  }, [arrangement.aiAssist, arrangement.id, arrangement.status, onAnalyzeAIAssist]);
 
   return (
     <div className="flex h-full flex-col bg-bg">
@@ -1149,6 +1280,15 @@ function ArrangementDetailScreen({
           onMarkRelatedContextNotSame={onMarkRelatedContextNotSame}
         />
 
+        <ArrangementAIAssistSection
+          arrangement={arrangement}
+          locale={locale}
+          analyzing={aiAssistAnalyzing}
+          runningAction={aiAssistRunningAction}
+          error={aiAssistError}
+          onRunAction={onRunAIAssistAction}
+        />
+
         {arrangement.status === "later" && (
           <p className="mt-3 rounded-[18px] bg-primary-soft px-4 py-3 text-[13px] leading-5 text-primary">
             {t("arrangements.laterHint")}
@@ -1189,7 +1329,7 @@ function ArrangementDetailScreen({
             <Button className="h-11 rounded-full" onClick={onUndoComplete}>
               {t("arrangements.undoComplete")}
             </Button>
-          ) : arrangement.status === "later" ? (
+          ) : arrangement.status === "later" || arrangement.status === "canceled" ? (
             <Button className="h-11 rounded-full" onClick={onRestore}>
               {t("arrangements.restore")}
             </Button>
@@ -1217,6 +1357,15 @@ function ArrangementDetailScreen({
           {arrangement.mergeHistory.length > 0 && (
             <Button className="h-11 rounded-full" variant="ghost" onClick={onUndoLastMerge}>
               {t("arrangements.undoLastMerge")}
+            </Button>
+          )}
+          {arrangement.statusHistory.length > 0 && (
+            <Button
+              className="h-11 rounded-full"
+              variant="ghost"
+              onClick={onUndoLastStatusChange}
+            >
+              {t("arrangements.undoLastStatusChange")}
             </Button>
           )}
         </div>
@@ -1249,6 +1398,144 @@ function DetailRow({
   );
 }
 
+function ArrangementAIAssistSection({
+  arrangement,
+  locale,
+  analyzing,
+  runningAction,
+  error,
+  onRunAction,
+}: {
+  arrangement: ArrangementItem;
+  locale: string;
+  analyzing: boolean;
+  runningAction: string | null;
+  error: string;
+  onRunAction: (action: ArrangementAIAssistSuggestedAction) => void;
+}) {
+  const { t } = usePreferences();
+  const aiAssist = arrangement.aiAssist;
+  const suggestedActions = aiAssist?.suggestedActions ?? [];
+  const generatedResults = aiAssist?.generatedResults ?? [];
+  const shouldShow =
+    analyzing || suggestedActions.length > 0 || generatedResults.length > 0 || Boolean(error);
+
+  if (!shouldShow) return null;
+
+  return (
+    <section className="mt-3 rounded-[18px] border border-[var(--record-card-border)] bg-surface px-4 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[13px] font-medium leading-5 text-text-muted">
+            {t("arrangements.aiAssistTitle")}
+          </p>
+          {aiAssist?.reason && (
+            <p className="mt-1 break-words text-[12px] leading-5 text-text-tertiary">
+              {aiAssist.reason}
+            </p>
+          )}
+        </div>
+        {aiAssist && (
+          <span className="shrink-0 rounded-full bg-primary-soft px-2 py-0.5 text-[11px] leading-5 text-primary">
+            {getExecutionTypeLabel(aiAssist.executionType, t)}
+          </span>
+        )}
+      </div>
+
+      {analyzing && (
+        <p className="mt-3 rounded-[14px] bg-surface-muted px-3 py-2 text-[13px] leading-5 text-text-tertiary">
+          {t("arrangements.aiAssistAnalyzing")}
+        </p>
+      )}
+
+      {suggestedActions.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {suggestedActions.map((action) => {
+            const runningKey = `${arrangement.id}:${action.actionId}`;
+            const isRunning = runningAction === runningKey;
+            return (
+              <div
+                key={action.actionId}
+                className="rounded-[14px] bg-surface-muted px-3 py-2"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="break-words text-[14px] font-medium leading-5 text-text">
+                      {action.title}
+                    </p>
+                    {action.description && (
+                      <p className="mt-1 break-words text-[12px] leading-5 text-text-tertiary">
+                        {action.description}
+                      </p>
+                    )}
+                  </div>
+                  <Button
+                    className="h-8 shrink-0 rounded-full px-3 text-[12px]"
+                    variant="secondary"
+                    onClick={() => onRunAction(action)}
+                    disabled={isRunning}
+                  >
+                    {isRunning
+                      ? t("arrangements.aiAssistGenerating")
+                      : t("arrangements.aiAssistGenerate")}
+                  </Button>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <span className="rounded-full bg-surface px-2 py-0.5 text-[11px] leading-4 text-text-tertiary">
+                    {getAIAssistOutputTypeLabel(action.outputType, t)}
+                  </span>
+                  <span className="rounded-full bg-surface px-2 py-0.5 text-[11px] leading-4 text-text-tertiary">
+                    {getAIAssistRiskLabel(action.riskLevel, t)}
+                  </span>
+                  {action.requiresUserConfirmation && (
+                    <span className="rounded-full bg-primary-soft px-2 py-0.5 text-[11px] leading-4 text-primary">
+                      {t("arrangements.aiAssistRequiresConfirmation")}
+                    </span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {generatedResults.length > 0 && (
+        <div className="mt-3 space-y-2">
+          <p className="px-1 text-[12px] font-medium leading-5 text-text-tertiary">
+            {t("arrangements.aiAssistGenerated")}
+          </p>
+          {generatedResults.map((result) => (
+            <div key={result.id} className="rounded-[14px] bg-surface-muted px-3 py-2">
+              <div className="flex items-start justify-between gap-3">
+                <p className="min-w-0 break-words text-[14px] font-medium leading-5 text-text">
+                  {result.title}
+                </p>
+                <span className="shrink-0 text-[11px] leading-5 text-text-tertiary">
+                  {formatFullDateTime(result.createdAt, locale)}
+                </span>
+              </div>
+              <p className="mt-2 whitespace-pre-wrap break-words text-[13px] leading-5 text-text-muted">
+                {result.content}
+              </p>
+              {result.safetyNote && (
+                <p className="mt-2 rounded-[12px] bg-surface px-2.5 py-1.5 text-[12px] leading-5 text-text-tertiary">
+                  {t("arrangements.aiAssistSafety")}：{result.safetyNote}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && (
+        <p className="mt-3 rounded-[14px] bg-surface-muted px-3 py-2 text-[13px] leading-5 text-text-tertiary">
+          {error}
+        </p>
+      )}
+    </section>
+  );
+}
+
 function ArrangementSourceContextSection({
   arrangement,
   locale,
@@ -1272,10 +1559,14 @@ function ArrangementSourceContextSection({
         {sourceContext && sourceContext.sourceType !== "manual" ? (
           <>
             <p className="rounded-[14px] bg-surface-muted px-3 py-2 text-[14px] leading-6 text-text-muted">
-              {sourceContext.sourceLabel || t("arrangements.sourceSelfChat")}
+              {formatSourceContextLabel(sourceContext, t)}
             </p>
             <ArrangementContextBlock
-              title={t("arrangements.sourceOriginal")}
+              title={
+                sourceContext.sourceType === "group_chat"
+                  ? t("arrangements.sourceRelatedMessages")
+                  : t("arrangements.sourceOriginal")
+              }
               content={sourceContext.messageContent}
             />
             {sourceContext.requestMessageContent && (
@@ -1333,6 +1624,29 @@ function ArrangementSourceContextSection({
           </div>
         )}
 
+        {arrangement.statusHistory.length > 0 && (
+          <div className="rounded-[14px] bg-surface-muted px-3 py-2">
+            <p className="text-[12px] font-medium leading-5 text-text-tertiary">
+              {t("arrangements.statusHistory")}
+            </p>
+            <div className="mt-1 space-y-1.5">
+              {arrangement.statusHistory.map((history) => (
+                <div key={history.id} className="text-[13px] leading-5 text-text-muted">
+                  <p>
+                    {formatFullDateTime(history.changedAt, locale)} ·{" "}
+                    {formatStatusHistorySummary(history, t)}
+                  </p>
+                  {history.sourceText && (
+                    <p className="mt-0.5 whitespace-pre-wrap break-words text-text-tertiary">
+                      {history.sourceText}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {arrangement.mergeHistory.length > 0 && (
           <div className="rounded-[14px] bg-surface-muted px-3 py-2">
             <p className="text-[12px] font-medium leading-5 text-text-tertiary">
@@ -1367,6 +1681,18 @@ function ArrangementSourceContextSection({
           <DetailRow
             label={t("arrangements.sourceBeneficiary")}
             value={sourceContext.beneficiary}
+          />
+        )}
+        {sourceContext?.relationReason && (
+          <DetailRow
+            label={t("arrangements.sourceRelationReason")}
+            value={getRelationReasonLabel(sourceContext.relationReason, t)}
+          />
+        )}
+        {arrangement.relatedPeople.length > 0 && (
+          <DetailRow
+            label={t("arrangements.sourceRelatedPeople")}
+            value={arrangement.relatedPeople.map((person) => person.name).join("、")}
           />
         )}
         {sourceContext && sourceContext.sourceType !== "manual" && (
@@ -1458,7 +1784,54 @@ function getRelatedContextTitle(
   if (role === "request") return t("arrangements.sourceRequest");
   if (role === "commitment") return t("arrangements.sourceCommitment");
   if (role === "progress") return t("arrangements.sourceProgress");
+  if (role === "status_change") return t("arrangements.sourceStatusChange");
   return t("arrangements.sourceSupplement");
+}
+
+function formatSourceContextLabel(
+  sourceContext: NonNullable<ArrangementItem["sourceContext"]>,
+  t: ReturnType<typeof usePreferences>["t"]
+) {
+  if (sourceContext.sourceType === "group_chat") {
+    return sourceContext.sourceLabel
+      ? `${t("arrangements.sourceGroupChat")} · ${sourceContext.sourceLabel.replace(/^群聊：/, "")}`
+      : t("arrangements.sourceGroupChat");
+  }
+  if (sourceContext.sourceType === "private_chat") {
+    return sourceContext.sourceLabel || t("arrangements.sourceCommitment");
+  }
+  if (sourceContext.sourceType === "self_chat") {
+    return sourceContext.sourceLabel || t("arrangements.sourceSelfChat");
+  }
+  return sourceContext.sourceLabel || t("arrangements.sourceManual");
+}
+
+function getRelationReasonLabel(
+  reason: NonNullable<ArrangementItem["sourceContext"]>["relationReason"],
+  t: ReturnType<typeof usePreferences>["t"]
+) {
+  return t(`arrangements.relation.${reason ?? "not_related"}`);
+}
+
+function getExecutionTypeLabel(
+  executionType: NonNullable<ArrangementItem["aiAssist"]>["executionType"],
+  t: ReturnType<typeof usePreferences>["t"]
+) {
+  return t(`arrangements.aiAssistExecution.${executionType}`);
+}
+
+function getAIAssistRiskLabel(
+  riskLevel: ArrangementAIAssistSuggestedAction["riskLevel"],
+  t: ReturnType<typeof usePreferences>["t"]
+) {
+  return t(`arrangements.aiAssistRisk.${riskLevel}`);
+}
+
+function getAIAssistOutputTypeLabel(
+  outputType: ArrangementAIAssistSuggestedAction["outputType"],
+  t: ReturnType<typeof usePreferences>["t"]
+) {
+  return t(`arrangements.aiAssistOutput.${outputType}`);
 }
 
 function formatMergeHistorySummary(
@@ -1476,6 +1849,31 @@ function formatMergeHistorySummary(
   return t("arrangements.mergeContextOnly");
 }
 
+function formatStatusHistorySummary(
+  history: ArrangementStatusHistoryItem,
+  t: ReturnType<typeof usePreferences>["t"]
+) {
+  if (history.changeType === "completed") {
+    return history.progressNote || t("arrangements.statusChangeCompleted");
+  }
+  if (history.changeType === "in_progress") {
+    return history.progressNote || t("arrangements.statusChangeInProgress");
+  }
+  if (history.changeType === "progress_update") {
+    return history.progressNote || t("arrangements.statusChangeProgress");
+  }
+  if (history.changeType === "rescheduled") {
+    return history.newTime
+      ? `${t("arrangements.statusChangeRescheduled")}：${history.newTime}`
+      : t("arrangements.statusChangeRescheduled");
+  }
+  if (history.changeType === "canceled") {
+    return history.progressNote || t("arrangements.statusChangeCanceled");
+  }
+
+  return history.reason || t("arrangements.statusHistory");
+}
+
 function getStatusMeta(
   status: ArrangementStatus,
   t: ReturnType<typeof usePreferences>["t"]
@@ -1487,10 +1885,24 @@ function getStatusMeta(
     };
   }
 
+  if (status === "in_progress") {
+    return {
+      label: t("arrangements.status.inProgress"),
+      className: "bg-primary-soft text-primary",
+    };
+  }
+
   if (status === "later") {
     return {
       label: t("arrangements.status.later"),
       className: "bg-surface-muted text-text-muted",
+    };
+  }
+
+  if (status === "canceled") {
+    return {
+      label: t("arrangements.status.canceled"),
+      className: "bg-fill-4 text-text-tertiary",
     };
   }
 
@@ -1860,6 +2272,14 @@ function padDatePart(value: number) {
   return String(value).padStart(2, "0");
 }
 
+function getRuntimeTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
+  } catch {
+    return "Asia/Shanghai";
+  }
+}
+
 function sortArrangementsByScope(
   a: ArrangementItem,
   b: ArrangementItem,
@@ -1876,4 +2296,18 @@ function sortArrangementsByScope(
   }
 
   return b.updatedAt - a.updatedAt;
+}
+
+function isArrangementInListScope(
+  arrangement: ArrangementItem,
+  scope: ArrangementListScope
+) {
+  if (scope === "pending") {
+    return arrangement.status === "pending" || arrangement.status === "in_progress";
+  }
+  if (scope === "completed") {
+    return arrangement.status === "completed" || arrangement.status === "canceled";
+  }
+
+  return arrangement.status === scope;
 }
